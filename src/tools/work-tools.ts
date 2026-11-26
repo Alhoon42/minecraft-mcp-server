@@ -24,6 +24,19 @@ type JobState = {
 
 let currentJob: JobState | null = null;
 
+// Where the bot goes when its bag is full (set with set-home).
+let home: Vec3 | null = new Vec3(-386, 54, 71);
+
+async function goHome(bot: mineflayer.Bot): Promise<void> {
+  if (!home) return;
+  try {
+    await withTimeout(bot.pathfinder.goto(new goals.GoalNear(home.x, home.y, home.z, 2)), 120000, bot);
+    bot.chat('Back at base with a full bag!');
+  } catch {
+    bot.chat("My bag's full but I couldn't find my way back to base.");
+  }
+}
+
 // Blocks the bot must never break (while digging jobs or while path-finding).
 const DEFAULT_PROTECTED = ['stone_bricks', 'chest', 'trapped_chest', 'barrel', 'furnace', 'blast_furnace', 'smoker',
   'crafting_table', 'ladder', 'torch', 'wall_torch', 'glass', 'glass_pane', 'hopper', 'oak_door', 'spruce_door', 'birch_door'];
@@ -314,9 +327,10 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
                     await tossJunk(bot, DEFAULT_KEEP);
                   }
                   if (inventoryFull(bot)) {
-                    job.message = `Paused: inventory full at Y${y} row Z${zz}`;
-                    bot.chat('My inventory is full! I need to deliver before I can carry on.');
+                    job.message = `Paused: inventory full at Y${y} row Z${zz} – went back to base`;
+                    bot.chat('My inventory is full! Heading back to base.');
                     job.stopRequested = true;
+                    await goHome(bot);
                     break;
                   }
                 }
@@ -383,8 +397,9 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
             if (inventoryFull(bot)) {
               await tossJunk(bot, DEFAULT_KEEP);
               if (inventoryFull(bot)) {
-                job.message = 'Paused: inventory full';
-                bot.chat('My inventory is full! I need to deliver.');
+                job.message = 'Paused: inventory full – went back to base';
+                bot.chat('My inventory is full! Heading back to base.');
+                await goHome(bot);
                 break;
               }
             }
@@ -430,6 +445,21 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
       if (movements) movements.blocksCantBreak = new Set();
       applyProtection(bot);
       return factory.createResponse(`Protected blocks: ${[...protectedNames].sort().join(', ')} (plus all beds and doors)`);
+    }
+  );
+
+  factory.registerTool(
+    "set-home",
+    "Set the base the bot returns to when its bag is full (default -386, 54, 71). With no coordinates, uses the bot's current position.",
+    {
+      x: z.coerce.number().optional(), y: z.coerce.number().optional(), z: z.coerce.number().optional(),
+    },
+    async ({ x, y, z: zz }: { x?: number; y?: number; z?: number }) => {
+      const bot = getBot();
+      home = (x !== undefined && y !== undefined && zz !== undefined)
+        ? new Vec3(x, y, zz)
+        : bot.entity.position.floored();
+      return factory.createResponse(`Home set to (${home.x}, ${home.y}, ${home.z})`);
     }
   );
 
