@@ -224,6 +224,16 @@ async function digOne(bot: mineflayer.Bot, pos: Vec3, job: JobState, allowDigPat
   }
 }
 
+// Walk backwards for a moment so the bot doesn't pick its own drops back up
+async function stepBack(bot: mineflayer.Bot): Promise<void> {
+  try {
+    bot.setControlState('back', true);
+    await sleep(900);
+  } finally {
+    bot.setControlState('back', false);
+  }
+}
+
 function startJob(name: string): JobState {
   currentJob = {
     name,
@@ -261,6 +271,7 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
           total += item.count;
           await sleep(100);
         }
+        await stepBack(bot);
         return factory.createResponse(`Dropped ${total} items (kept tools and food)`);
       }
       const matching = bot.inventory.items().filter(i => i.name === itemName);
@@ -270,6 +281,7 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
       const have = matching.reduce((s, i) => s + i.count, 0);
       const amount = Math.min(count ?? have, have);
       await bot.toss(matching[0].type, null, amount);
+      await stepBack(bot);
       return factory.createResponse(`Dropped ${amount} ${itemName}`);
     }
   );
