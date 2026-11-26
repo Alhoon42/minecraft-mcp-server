@@ -24,6 +24,30 @@ type JobState = {
 
 let currentJob: JobState | null = null;
 
+// Blocks the bot must never break (while digging jobs or while path-finding).
+const DEFAULT_PROTECTED = ['stone_bricks', 'chest', 'trapped_chest', 'barrel', 'furnace', 'blast_furnace', 'smoker',
+  'crafting_table', 'ladder', 'torch', 'wall_torch', 'glass', 'glass_pane', 'hopper', 'oak_door', 'spruce_door', 'birch_door'];
+const protectedNames: Set<string> = new Set(DEFAULT_PROTECTED);
+
+function isProtected(name: string): boolean {
+  return protectedNames.has(name) || name.endsWith('_bed') || name.endsWith('_door');
+}
+
+export function applyProtection(bot: mineflayer.Bot): void {
+  try {
+    const mcData = minecraftData(bot.version);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const movements: any = (bot.pathfinder as any).movements;
+    if (!movements) return;
+    if (!(movements.blocksCantBreak instanceof Set)) movements.blocksCantBreak = new Set();
+    for (const [name, block] of Object.entries(mcData.blocksByName)) {
+      if (isProtected(name)) movements.blocksCantBreak.add((block as { id: number }).id);
+    }
+  } catch (e) {
+    log('warn', `applyProtection failed: ${e}`);
+  }
+}
+
 const TOOL_SUFFIXES = ['_pickaxe', '_shovel', '_axe', '_hoe', 'shears'];
 const UNBREAKABLE = new Set(['bedrock', 'barrier', 'end_portal_frame', 'command_block']);
 const DANGER = new Set(['lava', 'water']);
@@ -144,7 +168,7 @@ function dropBelow(bot: mineflayer.Bot, pos: Vec3): number {
 async function digOne(bot: mineflayer.Bot, pos: Vec3, job: JobState, allowDigPath: boolean): Promise<void> {
   const block = bot.blockAt(pos);
   if (!block || block.name === 'air' || block.name === 'cave_air' || block.name === 'void_air') return;
-  if (UNBREAKABLE.has(block.name) || DANGER.has(block.name)) {
+  if (UNBREAKABLE.has(block.name) || DANGER.has(block.name) || isProtected(block.name)) {
     job.skipped++;
     return;
   }
@@ -263,6 +287,7 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
       const isSkipped = (x: number, y: number, zz: number) =>
         skip.some(s => s.x === x && s.z === zz && (s.y === undefined || s.y === y));
 
+      applyProtection(bot);
       const job = startJob(`dig-area (${minX},${minZ})-(${maxX},${maxZ}) Y${top}..${bottom}`);
 
       (async () => {
@@ -339,6 +364,7 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
       if (ids.length === 0) {
         return factory.createResponse(`Unknown block type: ${blockType}`);
       }
+      applyProtection(bot);
       const job = startJob(`mine-ore ${names.join('/')} x${target}`);
 
       (async () => {
@@ -384,6 +410,26 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
       })();
 
       return factory.createResponse(`Started ${job.name}. It runs in the background; use work-status to check and stop-work to stop.`);
+    }
+  );
+
+  factory.registerTool(
+    "protect-blocks",
+    "Set which block types the bot must never break (when digging or finding its way). Stone bricks, chests, furnaces, crafting tables, ladders, torches, glass, doors and beds are protected by default.",
+    {
+      add: z.array(z.string()).optional().describe("Block names to protect, e.g. ['oak_planks', 'polished_andesite']"),
+      remove: z.array(z.string()).optional().describe("Block names to stop protecting"),
+    },
+    async ({ add, remove }: { add?: string[]; remove?: string[] }) => {
+      const bot = getBot();
+      for (const n of add ?? []) protectedNames.add(n);
+      for (const n of remove ?? []) protectedNames.delete(n);
+      // rebuild pathfinder set from scratch so removals take effect
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const movements: any = (bot.pathfinder as any).movements;
+      if (movements) movements.blocksCantBreak = new Set();
+      applyProtection(bot);
+      return factory.createResponse(`Protected blocks: ${[...protectedNames].sort().join(', ')} (plus all beds and doors)`);
     }
   );
 
