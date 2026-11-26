@@ -1,0 +1,417 @@
+import { z } from "zod";
+import mineflayer from 'mineflayer';
+import pathfinderPkg from 'mineflayer-pathfinder';
+const { goals } = pathfinderPkg;
+import { Vec3 } from 'vec3';
+import minecraftData from 'minecraft-data';
+import { ToolFactory } from '../tool-factory.js';
+import { log } from '../logger.js';
+
+/*
+ * Long-running "jobs" (dig-area, mine-ore) run in the background so the bot keeps
+ * working between messages. Use work-status to check progress and stop-work to halt.
+ */
+
+type JobState = {
+  name: string;
+  running: boolean;
+  stopRequested: boolean;
+  dug: number;
+  skipped: number;
+  message: string;
+  startedAt: number;
+};
+
+let currentJob: JobState | null = null;
+
+const TOOL_SUFFIXES = ['_pickaxe', '_shovel', '_axe', '_hoe', 'shears'];
+const UNBREAKABLE = new Set(['bedrock', 'barrier', 'end_portal_frame', 'command_block']);
+const DANGER = new Set(['lava', 'water']);
+const DEFAULT_KEEP = ['_pickaxe', '_shovel', '_axe', '_sword', '_hoe', 'shears', 'torch', 'bread', 'cooked_', 'apple'];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isTool(item: any): boolean {
+  return TOOL_SUFFIXES.some(s => item.name.endsWith(s));
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function equipBestTool(bot: mineflayer.Bot, block: any): Promise<void> {
+  const tools = bot.inventory.items().filter(isTool);
+  if (tools.length === 0) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let best: any = null;
+  let bestTime = Infinity;
+  for (const tool of tools) {
+    let t = Infinity;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      t = (block as any).digTime(tool.type, false, false, false, [], []);
+    } catch {
+      t = Infinity;
+    }
+    // Only count tools that can actually harvest the block (so ore drops)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const harvest = (block as any).harvestTools;
+    if (harvest && !harvest[tool.type]) {
+      t = t * 10;
+    }
+    if (t < bestTime) {
+      bestTime = t;
+      best = tool;
+    }
+  }
+  if (best && (!bot.heldItem || bot.heldItem.type !== best.type)) {
+    await bot.equip(best, 'hand');
+  }
+}
+
+function inventoryFull(bot: mineflayer.Bot): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const inv: any = bot.inventory;
+  const empty = typeof inv.emptySlotCount === 'function' ? inv.emptySlotCount() : 1;
+  return empty === 0;
+}
+
+function shouldKeep(name: string, keep: string[]): boolean {
+  return keep.some(k => name.includes(k));
+}
+
+async function tossJunk(bot: mineflayer.Bot, keep: string[]): Promise<number> {
+  let tossed = 0;
+  for (const item of bot.inventory.items()) {
+    if (shouldKeep(item.name, keep)) continue;
+    if (['cobblestone', 'cobbled_deepslate', 'dirt', 'gravel', 'netherrack', 'tuff', 'andesite', 'diorite', 'granite'].includes(item.name)) {
+      await bot.tossStack(item);
+      tossed += item.count;
+    }
+  }
+  return tossed;
+}
+
+async function collectNearbyDrops(bot: mineflayer.Bot, radius: number): Promise<void> {
+  const drops = Object.values(bot.entities).filter(e =>
+    e && e.name === 'item' && e.position && e.position.distanceTo(bot.entity.position) <= radius
+  );
+  for (const drop of drops.slice(0, 8)) {
+    try {
+      await withTimeout(bot.pathfinder.goto(new goals.GoalNear(drop.position.x, drop.position.y, drop.position.z, 0)), 6000, bot);
+    } catch {
+      // ignore unreachable drops
+    }
+  }
+}
+
+async function withTimeout<T>(p: Promise<T>, ms: number, bot: mineflayer.Bot): Promise<T> {
+  let id: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    id = setTimeout(() => {
+      bot.pathfinder.stop();
+      reject(new Error('timeout'));
+    }, ms);
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    if (id) clearTimeout(id);
+    p.catch(() => {});
+  }
+}
+
+function touchesDanger(bot: mineflayer.Bot, pos: Vec3): boolean {
+  const offsets = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]];
+  for (const [dx, dy, dz] of offsets) {
+    const b = bot.blockAt(pos.offset(dx, dy, dz));
+    if (b && DANGER.has(b.name)) return true;
+  }
+  return false;
+}
+
+// Air gap under a block deeper than this means a cave: digging it would drop the bot.
+function dropBelow(bot: mineflayer.Bot, pos: Vec3): number {
+  let depth = 0;
+  for (let i = 1; i <= 6; i++) {
+    const b = bot.blockAt(pos.offset(0, -i, 0));
+    if (b && b.name !== 'air' && b.name !== 'cave_air') break;
+    depth++;
+  }
+  return depth;
+}
+
+async function digOne(bot: mineflayer.Bot, pos: Vec3, job: JobState, allowDigPath: boolean): Promise<void> {
+  const block = bot.blockAt(pos);
+  if (!block || block.name === 'air' || block.name === 'cave_air' || block.name === 'void_air') return;
+  if (UNBREAKABLE.has(block.name) || DANGER.has(block.name)) {
+    job.skipped++;
+    return;
+  }
+  if (touchesDanger(bot, pos)) {
+    job.skipped++;
+    return;
+  }
+
+  const eye = bot.entity.position.offset(0, bot.entity.height ?? 1.62, 0);
+  if (eye.distanceTo(pos.offset(0.5, 0.5, 0.5)) > 4.3) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const movements: any = (bot.pathfinder as any).movements;
+    const prevCanDig = movements ? movements.canDig : undefined;
+    if (movements && !allowDigPath) movements.canDig = false;
+    try {
+      await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)), 15000, bot);
+    } catch {
+      // try again letting the pathfinder dig its own way
+      if (movements) movements.canDig = true;
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)), 15000, bot);
+      } catch {
+        job.skipped++;
+        if (movements) movements.canDig = prevCanDig;
+        return;
+      }
+    }
+    if (movements) movements.canDig = prevCanDig;
+  }
+
+  const fresh = bot.blockAt(pos);
+  if (!fresh || fresh.name === 'air') return;
+  await equipBestTool(bot, fresh);
+  try {
+    await bot.dig(fresh, true);
+    job.dug++;
+  } catch (e) {
+    log('warn', `dig failed at ${pos}: ${e}`);
+    job.skipped++;
+  }
+}
+
+function startJob(name: string): JobState {
+  currentJob = {
+    name,
+    running: true,
+    stopRequested: false,
+    dug: 0,
+    skipped: 0,
+    message: 'starting',
+    startedAt: Date.now()
+  };
+  return currentJob;
+}
+
+export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
+  factory.registerTool(
+    "toss-item",
+    "Drop items from the bot's inventory on the ground in front of it (e.g. to hand them to a player). Use itemName 'all' to drop everything except tools and food.",
+    {
+      itemName: z.string().describe("Item name (e.g. 'coal', 'raw_iron') or 'all'"),
+      count: z.coerce.number().int().positive().optional().describe("How many to drop (default: all of that item)"),
+      lookAtX: z.coerce.number().optional().describe("Optional X to face before dropping (e.g. a player's position)"),
+      lookAtY: z.coerce.number().optional(),
+      lookAtZ: z.coerce.number().optional(),
+    },
+    async ({ itemName, count, lookAtX, lookAtY, lookAtZ }: { itemName: string; count?: number; lookAtX?: number; lookAtY?: number; lookAtZ?: number }) => {
+      const bot = getBot();
+      if (lookAtX !== undefined && lookAtY !== undefined && lookAtZ !== undefined) {
+        await bot.lookAt(new Vec3(lookAtX, lookAtY + 1, lookAtZ), true);
+      }
+      if (itemName === 'all') {
+        let total = 0;
+        for (const item of bot.inventory.items()) {
+          if (shouldKeep(item.name, DEFAULT_KEEP)) continue;
+          await bot.tossStack(item);
+          total += item.count;
+          await sleep(100);
+        }
+        return factory.createResponse(`Dropped ${total} items (kept tools and food)`);
+      }
+      const matching = bot.inventory.items().filter(i => i.name === itemName);
+      if (matching.length === 0) {
+        return factory.createResponse(`No ${itemName} in inventory`);
+      }
+      const have = matching.reduce((s, i) => s + i.count, 0);
+      const amount = Math.min(count ?? have, have);
+      await bot.toss(matching[0].type, null, amount);
+      return factory.createResponse(`Dropped ${amount} ${itemName}`);
+    }
+  );
+
+  factory.registerTool(
+    "dig-area",
+    "Start a background job that clears a box of blocks layer by layer from the top down, row by row (snake pattern). Returns straight away; the bot keeps working until done or stop-work is called. Skips blocks next to lava/water and blocks over deep caves. Check progress with work-status.",
+    {
+      x1: z.coerce.number().describe("Corner 1 X"),
+      z1: z.coerce.number().describe("Corner 1 Z"),
+      x2: z.coerce.number().describe("Corner 2 X"),
+      z2: z.coerce.number().describe("Corner 2 Z"),
+      topY: z.coerce.number().describe("Highest layer to dig (Y)"),
+      bottomY: z.coerce.number().describe("Lowest layer to dig (Y)"),
+      skip: z.array(z.object({ x: z.coerce.number(), y: z.coerce.number().optional(), z: z.coerce.number() })).optional()
+        .describe("Columns (x,z) or blocks (x,y,z) to leave alone, e.g. a ladder shaft"),
+      tossJunk: z.boolean().optional().describe("When inventory is full, drop stone/dirt/gravel instead of stopping (default: false)"),
+    },
+    async (args: { x1: number; z1: number; x2: number; z2: number; topY: number; bottomY: number; skip?: { x: number; y?: number; z: number }[]; tossJunk?: boolean }) => {
+      const bot = getBot();
+      if (currentJob?.running) {
+        return factory.createResponse(`Already running job '${currentJob.name}'. Call stop-work first.`);
+      }
+      const minX = Math.min(args.x1, args.x2), maxX = Math.max(args.x1, args.x2);
+      const minZ = Math.min(args.z1, args.z2), maxZ = Math.max(args.z1, args.z2);
+      const top = Math.max(args.topY, args.bottomY), bottom = Math.min(args.topY, args.bottomY);
+      const skip = args.skip ?? [];
+      const isSkipped = (x: number, y: number, zz: number) =>
+        skip.some(s => s.x === x && s.z === zz && (s.y === undefined || s.y === y));
+
+      const job = startJob(`dig-area (${minX},${minZ})-(${maxX},${maxZ}) Y${top}..${bottom}`);
+
+      (async () => {
+        try {
+          for (let y = top; y >= bottom && !job.stopRequested; y--) {
+            let forward = true;
+            for (let zz = maxZ; zz >= minZ && !job.stopRequested; zz--) {
+              const xs: number[] = [];
+              for (let x = minX; x <= maxX; x++) xs.push(x);
+              if (!forward) xs.reverse();
+              forward = !forward;
+              for (const x of xs) {
+                if (job.stopRequested) break;
+                if (isSkipped(x, y, zz)) continue;
+                const pos = new Vec3(x, y, zz);
+                const b = bot.blockAt(pos);
+                if (!b || b.name === 'air' || b.name === 'cave_air') continue;
+                if (dropBelow(bot, pos) > 3) {
+                  job.skipped++;
+                  continue;
+                }
+                if (inventoryFull(bot)) {
+                  if (args.tossJunk) {
+                    await tossJunk(bot, DEFAULT_KEEP);
+                  }
+                  if (inventoryFull(bot)) {
+                    job.message = `Paused: inventory full at Y${y} row Z${zz}`;
+                    bot.chat('My inventory is full! I need to deliver before I can carry on.');
+                    job.stopRequested = true;
+                    break;
+                  }
+                }
+                job.message = `Digging Y${y}, row Z${zz}`;
+                await digOne(bot, pos, job, false);
+              }
+              await collectNearbyDrops(bot, 6);
+            }
+          }
+          if (!job.stopRequested) {
+            job.message = `Finished: dug ${job.dug} blocks, skipped ${job.skipped}`;
+            bot.chat(`Big hole done! Dug ${job.dug} blocks.`);
+          } else if (!job.message.startsWith('Paused')) {
+            job.message = `Stopped: dug ${job.dug}, skipped ${job.skipped}`;
+          }
+        } catch (e) {
+          job.message = `Error: ${e}`;
+          log('error', `dig-area failed: ${e}`);
+        } finally {
+          job.running = false;
+        }
+      })();
+
+      return factory.createResponse(`Started ${job.name}. It runs in the background; use work-status to check and stop-work to stop.`);
+    }
+  );
+
+  factory.registerTool(
+    "mine-ore",
+    "Start a background job that finds and mines a block type nearby (e.g. coal_ore, iron_ore, deepslate_diamond_ore) until it has mined the target number or runs out. Picks up drops and always uses the best tool.",
+    {
+      blockType: z.string().describe("Block to mine, e.g. 'coal_ore'. Use 'deepslate_' versions for deep ores."),
+      alsoMine: z.array(z.string()).optional().describe("Other block types to count too, e.g. ['deepslate_coal_ore']"),
+      target: z.coerce.number().int().positive().describe("How many blocks to mine"),
+      maxDistance: z.coerce.number().optional().describe("Search radius (default 32)"),
+    },
+    async ({ blockType, alsoMine, target, maxDistance = 32 }: { blockType: string; alsoMine?: string[]; target: number; maxDistance?: number }) => {
+      const bot = getBot();
+      if (currentJob?.running) {
+        return factory.createResponse(`Already running job '${currentJob.name}'. Call stop-work first.`);
+      }
+      const mcData = minecraftData(bot.version);
+      const names = [blockType, ...(alsoMine ?? [])];
+      const ids = names.map(n => mcData.blocksByName[n]?.id).filter((id): id is number => id !== undefined);
+      if (ids.length === 0) {
+        return factory.createResponse(`Unknown block type: ${blockType}`);
+      }
+      const job = startJob(`mine-ore ${names.join('/')} x${target}`);
+
+      (async () => {
+        try {
+          let misses = 0;
+          while (job.dug < target && !job.stopRequested && misses < 3) {
+            const found = bot.findBlocks({ point: bot.entity.position, matching: ids, maxDistance, count: 64 });
+            if (found.length === 0) {
+              misses++;
+              job.message = 'No more found nearby';
+              break;
+            }
+            // nearest first
+            found.sort((a, b) => a.distanceTo(bot.entity.position) - b.distanceTo(bot.entity.position));
+            const pos = found[0];
+            if (inventoryFull(bot)) {
+              await tossJunk(bot, DEFAULT_KEEP);
+              if (inventoryFull(bot)) {
+                job.message = 'Paused: inventory full';
+                bot.chat('My inventory is full! I need to deliver.');
+                break;
+              }
+            }
+            job.message = `Mining ${bot.blockAt(pos)?.name} at (${pos.x}, ${pos.y}, ${pos.z})`;
+            const before = job.dug;
+            await digOne(bot, pos, job, true);
+            if (job.dug === before) misses++;
+            else misses = 0;
+            await collectNearbyDrops(bot, 5);
+          }
+          if (job.dug >= target) {
+            job.message = `Finished: mined ${job.dug}`;
+            bot.chat(`Done! Mined ${job.dug} ${blockType}.`);
+          } else if (!job.message.startsWith('Paused')) {
+            job.message = `Stopped after mining ${job.dug} (${job.message})`;
+          }
+        } catch (e) {
+          job.message = `Error: ${e}`;
+          log('error', `mine-ore failed: ${e}`);
+        } finally {
+          job.running = false;
+        }
+      })();
+
+      return factory.createResponse(`Started ${job.name}. It runs in the background; use work-status to check and stop-work to stop.`);
+    }
+  );
+
+  factory.registerTool(
+    "work-status",
+    "Check the progress of the current or last background job (dig-area / mine-ore)",
+    {},
+    async () => {
+      if (!currentJob) return factory.createResponse('No job has been started.');
+      const mins = Math.round((Date.now() - currentJob.startedAt) / 60000);
+      return factory.createResponse(
+        `${currentJob.running ? 'RUNNING' : 'NOT RUNNING'}: ${currentJob.name}\n` +
+        `Dug: ${currentJob.dug}, skipped: ${currentJob.skipped}, minutes: ${mins}\n` +
+        `Status: ${currentJob.message}`
+      );
+    }
+  );
+
+  factory.registerTool(
+    "stop-work",
+    "Stop the current background job",
+    {},
+    async () => {
+      const bot = getBot();
+      if (!currentJob?.running) return factory.createResponse('No job is running.');
+      currentJob.stopRequested = true;
+      bot.pathfinder.stop();
+      return factory.createResponse(`Stopping ${currentJob.name} (dug ${currentJob.dug} so far)`);
+    }
+  );
+}
