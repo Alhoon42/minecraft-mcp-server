@@ -6,6 +6,9 @@ import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { isFighting, cancelFight } from './defense-tools.js';
 import { stopFollowing } from './extra-tools.js';
 
@@ -32,8 +35,21 @@ let home: Vec3 | null = new Vec3(-386, 54, 71);
 // Y limits: never dig above maxDigY or below minDigY (null = no limit)
 let maxDigY: number | null = null;
 let minDigY: number | null = null;
-// Single protected levels, e.g. a floor at Y 25 (never dug)
+// Single protected levels, e.g. a floor at Y 25 (never dug). Saved so they survive restarts.
 const keepLevels = new Set<number>();
+const limitsFile = path.join(os.homedir(), '.claudebot', 'limits.json');
+function saveLimits(): void {
+  try {
+    fs.mkdirSync(path.dirname(limitsFile), { recursive: true });
+    fs.writeFileSync(limitsFile, JSON.stringify({ maxDigY, minDigY, keepLevels: [...keepLevels] }, null, 2));
+  } catch (e) { log('warn', `could not save limits: ${e}`); }
+}
+try {
+  const saved = JSON.parse(fs.readFileSync(limitsFile, 'utf8')) as { maxDigY?: number | null; minDigY?: number | null; keepLevels?: number[] };
+  maxDigY = saved.maxDigY ?? null;
+  minDigY = saved.minDigY ?? null;
+  for (const y of saved.keepLevels ?? []) keepLevels.add(y);
+} catch { /* nothing saved yet */ }
 function outsideLimits(y: number): boolean {
   return keepLevels.has(y) || (maxDigY !== null && y > maxDigY) || (minDigY !== null && y < minDigY);
 }
@@ -500,9 +516,10 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
       clear: z.boolean().optional().describe("Remove all limits"),
     },
     async ({ maxY, minY, clear }: { maxY?: number; minY?: number; clear?: boolean }) => {
-      if (clear) { maxDigY = null; minDigY = null; keepLevels.clear(); return factory.createResponse('Digging limits and protected levels removed.'); }
+      if (clear) { maxDigY = null; minDigY = null; keepLevels.clear(); saveLimits(); return factory.createResponse('Digging limits and protected levels removed.'); }
       if (maxY !== undefined) maxDigY = maxY;
       if (minY !== undefined) minDigY = minY;
+      saveLimits();
       return factory.createResponse(`Digging limits: ${maxDigY !== null ? `nothing above Y${maxDigY}` : 'no top limit'}, ${minDigY !== null ? `nothing below Y${minDigY}` : 'no bottom limit'}.`);
     }
   );
@@ -523,6 +540,7 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
         level = Math.floor(player.entity.position.y) - 1;
       }
       if (remove) keepLevels.delete(level); else keepLevels.add(level);
+      saveLimits();
       const list = [...keepLevels].sort((a, b) => b - a).map(v => `Y${v}`).join(', ') || 'none';
       return factory.createResponse(`${remove ? 'No longer protecting' : 'Leaving alone'} Y${level}. Protected levels: ${list}`);
     }
