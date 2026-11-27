@@ -185,7 +185,7 @@ export class QwenBrain {
   }
 
   private cachedSystem = '';
-  private showTiming = true;
+  private showTiming = false;
 
   /** Fixed part of the prompt. Kept identical between calls so Ollama can reuse it (much faster). */
   private systemPrompt(): string {
@@ -272,8 +272,11 @@ ${buildToolList(this.factory)}`;
         const plan = await this.askQwen([{ role: 'system', content: this.systemPrompt() }, ...this.history, live]);
         const secs = ((Date.now() - t0) / 1000).toFixed(1);
         log('info', `Qwen answered in ${secs}s`);
-        if (this.showTiming && plan.say) plan.say = `${plan.say} [${secs}s]`;
+        // Qwen sometimes copies old "[0.5s]" tags from the chat history: strip them
+        if (plan.say) plan.say = plan.say.replace(/\s*\[\d+(\.\d+)?s\]/g, '').trim();
+        // History gets the clean reply, so Qwen doesn't learn to add times itself
         this.history.push({ role: 'assistant', content: JSON.stringify(plan) });
+        if (this.showTiming && plan.say) plan.say = `${plan.say} [${secs}s]`;
         if (plan.say) {
           reply = plan.say;
           sayInGame(bot, plan.say);
