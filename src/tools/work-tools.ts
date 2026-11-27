@@ -188,10 +188,20 @@ async function withTimeout<T>(p: Promise<T>, ms: number, bot: mineflayer.Bot): P
 }
 
 function touchesDanger(bot: mineflayer.Bot, pos: Vec3): boolean {
+  // Water: only if it would flow in (next to or above the block)
   const offsets = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]];
   for (const [dx, dy, dz] of offsets) {
     const b = bot.blockAt(pos.offset(dx, dy, dz));
     if (b && DANGER.has(b.name)) return true;
+  }
+  // Lava: look 2 blocks around, including below, before opening anything up
+  for (let dx = -2; dx <= 2; dx++) {
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dz = -2; dz <= 2; dz++) {
+        const b = bot.blockAt(pos.offset(dx, dy, dz));
+        if (b && b.name === 'lava') return true;
+      }
+    }
   }
   return false;
 }
