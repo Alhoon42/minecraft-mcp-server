@@ -22,6 +22,7 @@ import { registerExtraTools } from './tools/extra-tools.js';
 import { registerPlacesTools } from './tools/places-tools.js';
 import { QwenBrain } from './qwen-brain.js';
 import { registerDefenceTools } from './tools/defense-tools.js';
+import * as http from 'http';
 
 setupStdioFiltering();
 
@@ -32,6 +33,16 @@ process.on('unhandledRejection', (reason) => {
 process.on('uncaughtException', (error) => {
   log('error', `Uncaught exception: ${error}`);
 });
+
+/** Try to own the local port. Only one copy of the server may run the bot (two would kick each other). */
+function claimPort(port: number): Promise<http.Server | null> {
+  return new Promise(resolve => {
+    if (port <= 0) { resolve(null); return; }
+    const srv = http.createServer();
+    srv.once('error', () => resolve(null));
+    srv.listen(port, '127.0.0.1', () => resolve(srv));
+  });
+}
 
 async function main() {
   const config = parseConfig();
@@ -49,7 +60,13 @@ async function main() {
     }
   );
 
-  connection.connect();
+  const owned = await claimPort(config.brainPort);
+  const isPrimary = config.brainPort <= 0 || owned !== null;
+  if (isPrimary) {
+    connection.connect();
+  } else {
+    log('info', 'Another copy already runs the bot; forwarding commands to it.');
+  }
 
   const server = new McpServer({
     name: "minecraft-mcp-server",
@@ -73,13 +90,35 @@ async function main() {
   registerPlacesTools(factory, getBot);
   registerDefenceTools(factory, getBot);
 
-  brain = new QwenBrain(factory, () => connection.getBot(), {
-    enabled: config.brain,
-    ollamaUrl: config.ollamaUrl,
-    model: config.model,
-    httpPort: config.brainPort,
-  });
-  brain.start();
+  const startBrain = (srv: http.Server | undefined) => {
+    brain = new QwenBrain(factory, () => connection.getBot(), {
+      enabled: config.brain,
+      ollamaUrl: config.ollamaUrl,
+      model: config.model,
+      httpPort: config.brainPort,
+    });
+    brain.start(srv);
+  };
+
+  if (isPrimary) {
+    startBrain(owned ?? undefined);
+  } else {
+    factory.proxyUrl = `http://127.0.0.1:${config.brainPort}`;
+    let takingOver = false;
+    factory.onProxyLost = async () => {
+      if (takingOver) return;
+      takingOver = true;
+      const srv = await claimPort(config.brainPort);
+      if (srv) {
+        log('info', 'The other copy has gone; this one now runs the bot.');
+        factory.proxyUrl = null;
+        connection.connect();
+        startBrain(srv);
+        await new Promise(r => setTimeout(r, 4000));
+      }
+      takingOver = false;
+    };
+  }
 
   process.stdin.on('end', () => {
     connection.cleanup();

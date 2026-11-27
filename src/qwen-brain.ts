@@ -178,8 +178,8 @@ export class QwenBrain {
     return `Qwen problem: ${m.slice(0, 150)}`;
   }
 
-  start(): void {
-    if (this.config.httpPort > 0) this.startHttp();
+  start(server?: http.Server): void {
+    if (server) this.startHttp(server);
     // Keep watching the bot's chat (the bot object changes when it reconnects)
     setInterval(() => patchChat(this.getBot()), 1000);
     log('info', `Qwen brain ${this.enabled ? 'on' : 'off'} (model ${this.config.model})`);
@@ -444,8 +444,26 @@ ${buildToolList(this.factory)}`;
     return reply;
   }
 
-  private startHttp(): void {
-    const server = http.createServer((req, res) => {
+  private startHttp(server: http.Server): void {
+    server.on('request', (req: http.IncomingMessage, res: http.ServerResponse) => {
+      // POST /tool {"name","args"}: another copy of this server forwarding a tool call
+      if (req.method === 'POST' && req.url?.startsWith('/tool')) {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', async () => {
+          let out: unknown;
+          try {
+            const { name, args } = JSON.parse(body) as { name: string; args: unknown };
+            const tool = this.factory.registry.get(name);
+            out = tool ? await tool.run(args) : { content: [{ type: 'text', text: `Unknown tool ${name}` }], isError: true };
+          } catch (e) {
+            out = { content: [{ type: 'text', text: `Failed: ${e}` }], isError: true };
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(out));
+        });
+        return;
+      }
       // GET /events?after=<id>: things the bot said by himself since that id.
       // Waits up to 25 s for something new (long poll). after=0 on first call returns only the latest id.
       if (req.method === 'GET' && req.url?.startsWith('/events')) {
@@ -492,9 +510,6 @@ ${buildToolList(this.factory)}`;
         res.end(JSON.stringify({ reply }));
       });
     });
-    server.on('error', e => log('warn', `Brain HTTP server error: ${e}`));
-    // Only listen on this PC, not the network
-    server.listen(this.config.httpPort, '127.0.0.1', () =>
-      log('info', `Brain listening on http://localhost:${this.config.httpPort}/say`));
+    log('info', `Brain listening on http://localhost:${this.config.httpPort}/say`);
   }
 }

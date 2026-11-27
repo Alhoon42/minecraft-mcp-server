@@ -18,6 +18,13 @@ export interface RegisteredTool {
 export class ToolFactory {
   /** All registered tools, so other parts of the server (e.g. the Qwen brain) can run them. */
   readonly registry = new Map<string, RegisteredTool>();
+  /**
+   * When another copy of this server already owns the bot (two copies would keep kicking each
+   * other out of the game), tool calls are forwarded to it at this URL instead.
+   */
+  proxyUrl: string | null = null;
+  /** Called when the other copy has gone away, so this one can take over the bot. */
+  onProxyLost: (() => Promise<void>) | null = null;
 
   constructor(
     private server: McpServer,
@@ -32,6 +39,22 @@ export class ToolFactory {
     executor: (args: any) => Promise<McpResponse>
   ): void {
     const run = async (args: unknown): Promise<McpResponse> => {
+      if (this.proxyUrl) {
+        try {
+          const res = await fetch(`${this.proxyUrl}/tool`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, args: args ?? {} }),
+          });
+          return await res.json() as McpResponse;
+        } catch {
+          // The copy that owned the bot is gone: take over and run it here
+          if (this.onProxyLost) await this.onProxyLost();
+          if (this.proxyUrl) {
+            return { content: [{ type: "text", text: "The Minecraft bot isn't reachable right now." }], isError: true };
+          }
+        }
+      }
       const connectionCheck = await this.connection.checkConnectionAndReconnect();
 
       if (!connectionCheck.connected) {
