@@ -56,6 +56,19 @@ export function applyProtection(bot: mineflayer.Bot): void {
     for (const [name, block] of Object.entries(mcData.blocksByName)) {
       if (isProtected(name)) movements.blocksCantBreak.add((block as { id: number }).id);
     }
+    // Rule: never dig straight down. Going down through solid ground is only allowed
+    // diagonally (forward + down), which makes stairs. Dropping into an open hole is still fine.
+    if (!movements.__noDigDown && typeof movements.getMoveDown === 'function') {
+      const orig = movements.getMoveDown.bind(movements);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      movements.getMoveDown = (node: any, neighbors: any[]) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const tmp: any[] = [];
+        orig(node, tmp);
+        for (const m of tmp) if (!m.toBreak || m.toBreak.length === 0) neighbors.push(m);
+      };
+      movements.__noDigDown = true;
+    }
   } catch (e) {
     log('warn', `applyProtection failed: ${e}`);
   }
@@ -315,6 +328,104 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
       await bot.toss(matching[0].type, null, amount);
       await stepBack(bot);
       return factory.createResponse(`Dropped ${amount} ${itemName}`);
+    }
+  );
+
+  factory.registerTool(
+    "dig-stairs",
+    "Dig a staircase down (or up) to a target Y level, one step at a time, in a compass direction. Never digs straight down. Stops at lava, water or big drops. Places cobblestone over small gaps in the floor.",
+    {
+      targetY: z.coerce.number().int().describe("Y level to reach, e.g. -58 for diamonds"),
+      direction: z.enum(['north', 'south', 'east', 'west']).optional().describe("Which way the stairs go (default: the way the bot is facing)"),
+    },
+    async ({ targetY, direction }: { targetY: number; direction?: 'north' | 'south' | 'east' | 'west' }) => {
+      const bot = getBot();
+      if (currentJob?.running) {
+        return factory.createResponse(`Already running job '${currentJob.name}'. Call stop-work first.`);
+      }
+      const dirs = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] } as const;
+      let dir = direction;
+      if (!dir) {
+        const yaw = bot.entity.yaw; // 0 = north (−z) in mineflayer
+        const a = ((yaw % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+        dir = a < Math.PI / 4 || a >= 7 * Math.PI / 4 ? 'north' : a < 3 * Math.PI / 4 ? 'west' : a < 5 * Math.PI / 4 ? 'south' : 'east';
+      }
+      const [dx, dz] = dirs[dir];
+      const up = targetY > Math.floor(bot.entity.position.y);
+      applyProtection(bot);
+      const job = startJob(`dig-stairs ${up ? 'up' : 'down'} ${dir} to Y${targetY}`);
+
+      (async () => {
+        try {
+          let steps = 0;
+          while (!job.stopRequested) {
+            const cur = bot.entity.position.floored();
+            if (cur.y === targetY) break;
+            const next = cur.offset(dx, up ? 1 : -1, dz);
+            // Clear feet, head and headroom of the next step (and the block above us when going up)
+            const toClear = up
+              ? [cur.offset(0, 2, 0), next, next.offset(0, 1, 0)]
+              : [next, next.offset(0, 1, 0), next.offset(0, 2, 0)];
+            let blocked = false;
+            for (const p of toClear) {
+              const b = bot.blockAt(p);
+              if (!b) { blocked = true; break; }
+              if (DANGER.has(b.name) || touchesDanger(bot, p)) {
+                job.message = `Stopped: lava or water near (${p.x}, ${p.y}, ${p.z})`;
+                bot.chat('Stopped digging stairs: lava or water ahead!');
+                blocked = true; break;
+              }
+              if (UNBREAKABLE.has(b.name) || isProtected(b.name)) {
+                job.message = `Stopped: can't break ${b.name}`;
+                blocked = true; break;
+              }
+              if (b.name !== 'air' && b.name !== 'cave_air') {
+                await equipBestTool(bot, b);
+                await bot.dig(b, true);
+                job.dug++;
+              }
+            }
+            if (blocked) break;
+            // Floor under the next step
+            const floorPos = next.offset(0, -1, 0);
+            const floor = bot.blockAt(floorPos);
+            if (floor && (floor.name === 'air' || floor.name === 'cave_air')) {
+              if (dropBelow(bot, floorPos) > 3) {
+                job.message = `Stopped: big drop at (${floorPos.x}, ${floorPos.y}, ${floorPos.z})`;
+                bot.chat('Stopped digging stairs: there is a cave below.');
+                break;
+              }
+              const filler = bot.inventory.items().find(i => ['cobblestone', 'cobbled_deepslate', 'dirt', 'stone'].includes(i.name));
+              const support = bot.blockAt(floorPos.offset(0, -1, 0));
+              if (filler && support && support.name !== 'air') {
+                try {
+                  await bot.equip(filler, 'hand');
+                  await bot.placeBlock(support, new Vec3(0, 1, 0));
+                } catch { /* walk on anyway */ }
+              }
+            }
+            const movements: any = (bot.pathfinder as any).movements;
+            const prev = movements?.canDig;
+            if (movements) movements.canDig = false;
+            try {
+              await withTimeout(bot.pathfinder.goto(new goals.GoalBlock(next.x, next.y, next.z)), 10000, bot);
+            } finally {
+              if (movements) movements.canDig = prev;
+            }
+            steps++;
+            job.message = `Step ${steps}, now at Y${next.y}`;
+            if (steps % 50 === 0) await collectNearbyDrops(bot, 4);
+          }
+          job.message = job.stopRequested ? 'Stopped' : (job.message.startsWith('Stopped') ? job.message : `Reached Y${bot.entity.position.floored().y}`);
+          bot.chat(`Stairs done: ${job.message}`);
+        } catch (e) {
+          job.message = `Error: ${e}`;
+          log('warn', `dig-stairs error: ${e}`);
+        } finally {
+          job.running = false;
+        }
+      })();
+      return factory.createResponse(`Started digging stairs ${up ? 'up' : 'down'} towards the ${dir} to Y${targetY}. Check with work-status.`);
     }
   );
 

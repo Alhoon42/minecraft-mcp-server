@@ -3,7 +3,7 @@ import * as http from 'http';
 import { ZodType } from 'zod';
 import { ToolFactory } from './tool-factory.js';
 import { log } from './logger.js';
-import { resolveBlockNames } from './tools/work-tools.js';
+import { resolveBlockNames, applyProtection } from './tools/work-tools.js';
 
 /*
  * Qwen brain: lets the player talk to the bot directly, without Claude.
@@ -25,7 +25,7 @@ export interface BrainConfig {
 // Commands Qwen may use (others, like send-chat or fly-to, are left out on purpose)
 const ALLOWED = [
   'get-position', 'move-to-position', 'list-inventory', 'find-blocks', 'find-entity',
-  'dig-block', 'place-block', 'equip-item', 'toss-item', 'dig-area', 'mine-ore', 'stop-work',
+  'dig-block', 'place-block', 'equip-item', 'toss-item', 'dig-area', 'dig-stairs', 'mine-ore', 'stop-work',
   'work-status', 'craft', 'smelt-item', 'deposit-to-chest', 'withdraw-from-chest', 'eat',
   'place-torch', 'follow-player', 'stop-following', 'sleep', 'wake-up', 'protect-blocks',
   'set-home', 'save-place', 'list-places', 'go-to-place', 'check-chests', 'where-is',
@@ -136,7 +136,7 @@ Rules:
 - Only use commands from the list, with the exact arg names.
 - "come here"/"come to me": move-to-position with the player's position and range 2.
 - "give me X"/"throw me X": move-to-position near the player (range 3), then toss-item with lookAt set to the player's position.
-- Never dig straight down. Don't break stone bricks, chests, furnaces, ladders, doors or beds.
+- Never dig straight down. To go deeper (e.g. for diamonds), use dig-stairs with a targetY (diamonds: -58), then mine-ore. Don't break stone bricks, chests, furnaces, ladders, doors or beds.
 - Item names use Minecraft ids, e.g. coal, raw_iron, oak_log, birch_planks, cobblestone.
 - To get ores (diamonds, iron, coal...), use mine-ore, e.g. {"blockType": "diamond_ore", "target": 10}. Deep versions are included automatically. Diamonds are deep (below Y 0); if none are found, tell the player to send you deeper.
 - For wood, use mine-ore with {"blockType": "trees", "target": 20} (finds every kind of log). Trees are on the surface, so if you're underground and none are found, say so.
@@ -232,6 +232,7 @@ ${buildToolList(this.factory)}`;
             else if (names.length) a.args.blockType = names[0];
             a.args.maxDistance ??= 64;
           }
+          if (bot) applyProtection(bot);
           log('info', `Qwen -> ${a.command} ${JSON.stringify(a.args ?? {})}`);
           const r = await tool.run(a.args ?? {});
           const out = r.content.map(c => c.text).join('\n');
