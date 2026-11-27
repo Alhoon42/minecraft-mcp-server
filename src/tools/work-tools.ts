@@ -37,21 +37,48 @@ let home: Vec3 | null = new Vec3(-386, 54, 71);
 let maxDigY: number | null = null;
 let minDigY: number | null = null;
 // Single protected levels, e.g. a floor at Y 25 (never dug). Saved so they survive restarts.
+// Protected zones: boxes the bot never breaks anything inside (e.g. a bunker)
+interface Zone { name: string; minX: number; maxX: number; minZ: number; maxZ: number; minY: number; maxY: number }
+const zones: Zone[] = [];
 const keepLevels = new Set<number>();
 const limitsFile = path.join(os.homedir(), '.claudebot', 'limits.json');
 function saveLimits(): void {
   try {
     fs.mkdirSync(path.dirname(limitsFile), { recursive: true });
-    fs.writeFileSync(limitsFile, JSON.stringify({ maxDigY, minDigY, keepLevels: [...keepLevels] }, null, 2));
+    fs.writeFileSync(limitsFile, JSON.stringify({ maxDigY, minDigY, keepLevels: [...keepLevels], zones }, null, 2));
   } catch (e) { log('warn', `could not save limits: ${e}`); }
 }
 try {
-  const saved = JSON.parse(fs.readFileSync(limitsFile, 'utf8')) as { maxDigY?: number | null; minDigY?: number | null; keepLevels?: number[] };
+  const saved = JSON.parse(fs.readFileSync(limitsFile, 'utf8')) as { maxDigY?: number | null; minDigY?: number | null; keepLevels?: number[]; zones?: Zone[] };
+  for (const zq of saved.zones ?? []) zones.push(zq);
   maxDigY = saved.maxDigY ?? null;
   minDigY = saved.minDigY ?? null;
   for (const y of saved.keepLevels ?? []) keepLevels.add(y);
 } catch { /* nothing saved yet */ }
-function outsideLimits(y: number): boolean {
+function inZone(x: number, y: number, z: number): Zone | undefined {
+  return zones.find(q => x >= q.minX && x <= q.maxX && z >= q.minZ && z <= q.maxZ && y >= q.minY && y <= q.maxY);
+}
+// Ring rule: a block with stone bricks somewhere along all 4 directions on its own level is
+// inside a stone-brick ring (e.g. a bunker floor). Never break or build there. Levels above
+// and below are free.
+const RING_REACH = 24;
+const isBrick = (n?: string) => !!n && n.endsWith('stone_bricks');
+export function insideBrickRing(bot: mineflayer.Bot, pos: Vec3): boolean {
+  if (isBrick(bot.blockAt(pos)?.name)) return false; // the ring itself is protected separately
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    let hit = false;
+    for (let i = 1; i <= RING_REACH; i++) {
+      const b = bot.blockAt(pos.offset(dx * i, 0, dz * i));
+      if (!b) break;
+      if (isBrick(b.name)) { hit = true; break; }
+    }
+    if (!hit) return false;
+  }
+  return true;
+}
+
+function outsideLimits(y: number, x?: number, z?: number): boolean {
+  if (x !== undefined && z !== undefined && inZone(x, y, z)) return true;
   return keepLevels.has(y) || (maxDigY !== null && y > maxDigY) || (minDigY !== null && y < minDigY);
 }
 
@@ -96,6 +123,19 @@ export function applyProtection(bot: mineflayer.Bot): void {
     for (const [name, block] of Object.entries(mcData.blocksByName)) {
       if (isProtected(name)) movements.blocksCantBreak.add((block as { id: number }).id);
     }
+    // Pathfinder must never break blocks inside protected zones either
+    if (!movements.__zoneHook && Array.isArray(movements.exclusionAreasBreak)) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      movements.exclusionAreasBreak.push((block: any) => (block?.position &&
+        (inZone(block.position.x, block.position.y, block.position.z) || insideBrickRing(bot, block.position))) ? Infinity : 0);
+      if (Array.isArray(movements.exclusionAreasPlace)) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        movements.exclusionAreasPlace.push((block: any) => (block?.position &&
+          (inZone(block.position.x, block.position.y, block.position.z) || insideBrickRing(bot, block.position))) ? Infinity : 0);
+      }
+      movements.__zoneHook = true;
+    }
+
     // Rule: only dig when asked. Walking around (come here, go to bed, chests...) finds a
     // natural path. Dig jobs (dig-area, mine-ore, dig-stairs) switch digging on themselves.
     movements.canDig = false;
@@ -248,7 +288,7 @@ function dropBelow(bot: mineflayer.Bot, pos: Vec3): number {
 type DigResult = 'dug' | 'empty' | 'limit' | 'protected' | 'lava' | 'water' | 'unreachable' | 'failed';
 
 async function digOne(bot: mineflayer.Bot, pos: Vec3, job: JobState, allowDigPath: boolean): Promise<DigResult> {
-  if (outsideLimits(pos.y)) { job.skipped++; return 'limit'; }
+  if (outsideLimits(pos.y, pos.x, pos.z) || insideBrickRing(bot, pos)) { job.skipped++; return 'limit'; }
   // Wait while fighting off a mob
   while (isFighting() && !job.stopRequested) await sleep(300);
   const block = bot.blockAt(pos);
@@ -491,7 +531,7 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
                 bot.chat('Stopped digging stairs: lava or water ahead!');
                 blocked = true; break;
               }
-              if (outsideLimits(p.y) && b.name !== 'air' && b.name !== 'cave_air') {
+              if ((outsideLimits(p.y, p.x, p.z) || insideBrickRing(bot, p)) && b.name !== 'air' && b.name !== 'cave_air') {
                 job.message = `Stopped: Y${p.y} is outside the digging limits`;
                 blocked = true; break;
               }
@@ -517,7 +557,7 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
               }
               const filler = bot.inventory.items().find(i => ['cobblestone', 'cobbled_deepslate', 'dirt', 'stone'].includes(i.name));
               const support = bot.blockAt(floorPos.offset(0, -1, 0));
-              if (filler && support && support.name !== 'air') {
+              if (filler && support && support.name !== 'air' && !insideBrickRing(bot, floorPos)) {
                 try {
                   await bot.equip(filler, 'hand');
                   await bot.placeBlock(support, new Vec3(0, 1, 0));
@@ -585,6 +625,66 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
       saveLimits();
       const list = [...keepLevels].sort((a, b) => b - a).map(v => `Y${v}`).join(', ') || 'none';
       return factory.createResponse(`${remove ? 'No longer protecting' : 'Leaving alone'} Y${level}. Protected levels: ${list}`);
+    }
+  );
+
+  factory.registerTool(
+    "protect-zone",
+    "Protect everything inside 4 corner marker blocks (e.g. a bunker): the bot will never break any block inside that box, at any height between minY and maxY (default: the whole height of the world). Corners are found like dig-inside-markers. remove: true deletes the zone with that name.",
+    {
+      marker: z.string().optional().describe("Corner block the player placed, e.g. 'gold_block' (required unless removing)"),
+      name: z.string().optional().describe("Name for the zone, e.g. 'bunker' (default 'zone N')"),
+      minY: z.coerce.number().int().optional(),
+      maxY: z.coerce.number().int().optional(),
+      includeEdge: z.boolean().optional().describe("Also protect the rows the markers sit on (default true)"),
+      remove: z.boolean().optional(),
+    },
+    async ({ marker, name, minY, maxY, includeEdge = true, remove }: { marker?: string; name?: string; minY?: number; maxY?: number; includeEdge?: boolean; remove?: boolean }) => {
+      const bot = getBot();
+      if (remove) {
+        const i = zones.findIndex(q => q.name === (name ?? '').toLowerCase());
+        if (i < 0) return factory.createResponse(`No zone called "${name}". Zones: ${zones.map(q => q.name).join(', ') || 'none'}`);
+        zones.splice(i, 1);
+        saveLimits();
+        return factory.createResponse(`Removed zone "${name}".`);
+      }
+      if (!marker) return factory.createResponse('Which block did you put on the corners?');
+      const names = resolveBlockNames(bot.version, marker);
+      const mcData = minecraftData(bot.version);
+      const id = mcData.blocksByName[names[0] ?? marker]?.id;
+      if (id === undefined) return factory.createResponse(`Unknown block: ${marker}`);
+      const found = bot.findBlocks({ matching: id, maxDistance: 64, count: 256 });
+      const key = (x: number, y: number, zz: number) => `${x},${y},${zz}`;
+      const set = new Set(found.map(p => key(p.x, p.y, p.z)));
+      let best: { minX: number; maxX: number; minZ: number; maxZ: number; y: number; area: number } | null = null;
+      for (const a of found) for (const b of found) {
+        if (b.y !== a.y || b.x <= a.x || b.z <= a.z) continue;
+        if (!set.has(key(a.x, a.y, b.z)) || !set.has(key(b.x, a.y, a.z))) continue;
+        const area = (b.x - a.x) * (b.z - a.z);
+        if (!best || area > best.area) best = { minX: a.x, maxX: b.x, minZ: a.z, maxZ: b.z, y: a.y, area };
+      }
+      if (!best) return factory.createResponse(`I can't find 4 ${marker} corners on the same level within 64 blocks.`);
+      const e = includeEdge ? 0 : 1;
+      const zoneName = (name ?? `zone ${zones.length + 1}`).toLowerCase();
+      const zq: Zone = { name: zoneName, minX: best.minX + e, maxX: best.maxX - e, minZ: best.minZ + e, maxZ: best.maxZ - e,
+        minY: minY ?? -64, maxY: maxY ?? 320 };
+      const old = zones.findIndex(q => q.name === zoneName);
+      if (old >= 0) zones.splice(old, 1);
+      zones.push(zq);
+      saveLimits();
+      applyProtection(bot);
+      return factory.createResponse(`Protected "${zoneName}": X ${zq.minX}..${zq.maxX}, Z ${zq.minZ}..${zq.maxZ}, Y ${zq.minY}..${zq.maxY}. I won't break anything in there.`);
+    }
+  );
+
+  factory.registerTool(
+    "list-zones",
+    "List protected zones and digging limits.",
+    {},
+    async () => {
+      const lines = zones.map(q => `- ${q.name}: X ${q.minX}..${q.maxX}, Z ${q.minZ}..${q.maxZ}, Y ${q.minY}..${q.maxY}`);
+      const lv = [...keepLevels].map(v => `Y${v}`).join(', ');
+      return factory.createResponse(`${lines.length ? lines.join('\n') : 'No zones.'}\nProtected levels: ${lv || 'none'}. Max Y: ${maxDigY ?? 'none'}, min Y: ${minDigY ?? 'none'}.`);
     }
   );
 

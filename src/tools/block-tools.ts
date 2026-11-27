@@ -7,6 +7,7 @@ import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
 import { coerceCoordinates } from './coordinate-utils.js';
+import { insideBrickRing } from './work-tools.js';
 
 type FaceDirection = 'up' | 'down' | 'north' | 'south' | 'east' | 'west';
 const MAX_FIND_BLOCKS_COUNT = 256;
@@ -36,6 +37,10 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
       const botPos = bot.entity.position.floored();
       if (placePos.equals(botPos) || placePos.equals(botPos.offset(0, 1, 0))) {
         return factory.createResponse(`You can't place a block where you're standing or one block above`);
+      }
+
+      if (insideBrickRing(bot, placePos)) {
+        return factory.createResponse(`(${x}, ${y}, ${z}) is inside a stone-brick ring, so I'm leaving it alone.`);
       }
 
       const blockAtPos = bot.blockAt(placePos);
@@ -98,11 +103,14 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
       ({ x, y, z } = coerceCoordinates(x, y, z));
 
       const bot = getBot();
-      const blockPos = new Vec3(x, y, z);
+      const blockPos = new Vec3(x, y, z).floored();
       const block = bot.blockAt(blockPos);
 
       if (!block || block.name === 'air') {
         return factory.createResponse(`No block found at position (${x}, ${y}, ${z})`);
+      }
+      if (insideBrickRing(bot, blockPos) || block.name.endsWith('stone_bricks')) {
+        return factory.createResponse(`(${x}, ${y}, ${z}) is protected (stone-brick ring), so I'm leaving it alone.`);
       }
 
       if (!bot.canDigBlock(block) || !bot.canSeeBlock(block)) {
