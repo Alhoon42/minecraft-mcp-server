@@ -1,5 +1,8 @@
 import mineflayer from 'mineflayer';
 import * as http from 'http';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { ZodType } from 'zod';
 import { ToolFactory } from './tool-factory.js';
 import { log } from './logger.js';
@@ -73,6 +76,22 @@ function sayInGame(bot: mineflayer.Bot | null | undefined, text: string): void {
   for (let i = 0; i < clean.length && i < 600; i += 240) bot.chat(clean.slice(i, i + 240));
 }
 
+const MODELS: Record<string, string> = {
+  fast: 'qwen3:8b',        // quick replies, good enough for commands
+  big: 'qwen3.6:latest',   // smarter but slower
+};
+const brainFile = path.join(os.homedir(), '.claudebot', 'brain.json');
+
+function loadSavedModel(): string | null {
+  try { return (JSON.parse(fs.readFileSync(brainFile, 'utf8')) as { model?: string }).model ?? null; } catch { return null; }
+}
+function saveModel(model: string): void {
+  try {
+    fs.mkdirSync(path.dirname(brainFile), { recursive: true });
+    fs.writeFileSync(brainFile, JSON.stringify({ model }, null, 2));
+  } catch (e) { log('warn', `could not save brain model: ${e}`); }
+}
+
 export class QwenBrain {
   private history: Msg[] = [];
   private queue: Promise<unknown> = Promise.resolve();
@@ -84,6 +103,23 @@ export class QwenBrain {
     private config: BrainConfig
   ) {
     this.enabled = config.enabled;
+    const saved = loadSavedModel();
+    if (saved) this.config.model = saved;
+  }
+
+  private setModel(model: string): void {
+    this.config.model = model;
+    saveModel(model);
+    sayInGame(this.getBot(), `Brain switched to ${model}. First reply may take a moment while it loads.`);
+    this.askQwen([{ role: 'system', content: this.systemPrompt() }, { role: 'user', content: 'Player: hi (warm-up)' }])
+      .catch(e => sayInGame(this.getBot(), this.explain(e)));
+  }
+
+  private explain(e: unknown): string {
+    const m = String(e);
+    if (m.includes('fetch failed')) return "I can't reach Qwen. Is Ollama running?";
+    if (m.includes('not found')) return `Ollama doesn't have ${this.config.model} yet. Type in a command prompt: ollama pull ${this.config.model}`;
+    return `Qwen problem: ${m.slice(0, 150)}`;
   }
 
   start(): void {
@@ -105,6 +141,10 @@ export class QwenBrain {
     const m = message.trim();
     const low = m.toLowerCase();
     if (low === 'brain off') { this.enabled = false; sayInGame(this.getBot(), 'Qwen brain off. Claude only now.'); return; }
+    if (low === 'brain fast') { this.setModel(MODELS.fast); return; }
+    if (low === 'brain big') { this.setModel(MODELS.big); return; }
+    if (low.startsWith('brain model ')) { this.setModel(m.slice('brain model '.length).trim()); return; }
+    if (low === 'brain which') { sayInGame(this.getBot(), `Using ${this.config.model}`); return; }
     if (low === 'brain on') { this.enabled = true; sayInGame(this.getBot(), 'Qwen brain on. Talk to me!'); return; }
     if (!this.enabled || m.startsWith('/')) return;
     this.enqueue(username, m).catch(() => {});
@@ -243,9 +283,7 @@ ${buildToolList(this.factory)}`;
         if (!needAnswer) break;
       }
     } catch (e) {
-      const msg = String(e).includes('fetch failed')
-        ? "I can't reach Qwen. Is Ollama running?"
-        : `Qwen problem: ${String(e).slice(0, 150)}`;
+      const msg = this.explain(e);
       log('warn', msg);
       sayInGame(bot, msg);
       onSay(msg);

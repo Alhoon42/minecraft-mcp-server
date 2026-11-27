@@ -41,7 +41,7 @@ export function parseConfig(): ServerConfig {
     .option('model', {
       type: 'string',
       description: 'Ollama model for the brain',
-      default: 'qwen3.6:latest'
+      default: 'qwen3:8b'
     })
     .option('brain-port', {
       type: 'number',
@@ -57,7 +57,7 @@ export function parseConfig(): ServerConfig {
     username: String(argv.username),
     brain: argv.brain !== false,
     ollamaUrl: String(argv['ollama-url'] ?? 'http://localhost:11434'),
-    model: String(argv.model ?? 'qwen3.6:latest'),
+    model: String(argv.model ?? 'qwen3:8b'),
     brainPort: Number(argv['brain-port'] ?? 3456),
   };
 }
