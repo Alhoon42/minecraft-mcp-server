@@ -146,13 +146,14 @@ export class QwenBrain {
     const m = message.trim();
     const low = m.toLowerCase();
     if (STOP_RE.test(m)) { this.emergencyStop(); return; }
-    if (low === 'brain off') { this.enabled = false; sayInGame(this.getBot(), 'Qwen brain off. Claude only now.'); return; }
+    if (low === 'brain off') { this.enabled = false; this.history = []; sayInGame(this.getBot(), 'Qwen brain off. Claude only now.'); return; }
     if (low === 'brain fast') { this.setModel(MODELS.fast); return; }
     if (low === 'brain big') { this.setModel(MODELS.big); return; }
     if (low.startsWith('brain model ')) { this.setModel(m.slice('brain model '.length).trim()); return; }
     if (low === 'brain timing') { this.showTiming = !this.showTiming; sayInGame(this.getBot(), `Timing ${this.showTiming ? 'on' : 'off'}`); return; }
+    if (low === 'brain reset') { this.history = []; sayInGame(this.getBot(), 'Memory of our chat cleared.'); return; }
     if (low === 'brain which') { sayInGame(this.getBot(), `Using ${this.config.model}`); return; }
-    if (low === 'brain on') { this.enabled = true; sayInGame(this.getBot(), 'Qwen brain on. Talk to me!'); return; }
+    if (low === 'brain on') { this.enabled = true; this.history = []; sayInGame(this.getBot(), 'Qwen brain on. Talk to me!'); return; }
     if (!this.enabled || m.startsWith('/')) return;
     this.enqueue(username, m).catch(() => {});
   }
