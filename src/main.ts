@@ -64,6 +64,8 @@ async function main() {
   const isPrimary = config.brainPort <= 0 || owned !== null;
   if (isPrimary) {
     connection.connect();
+    // Keep him in the game: if he's been kicked or the world wasn't open yet, rejoin by himself
+    setInterval(() => { connection.checkConnectionAndReconnect().catch(() => {}); }, 15000);
   } else {
     log('info', 'Another copy already runs the bot; forwarding commands to it.');
   }
@@ -113,6 +115,7 @@ async function main() {
         log('info', 'The other copy has gone; this one now runs the bot.');
         factory.proxyUrl = null;
         connection.connect();
+        setInterval(() => { connection.checkConnectionAndReconnect().catch(() => {}); }, 15000);
         startBrain(srv);
         await new Promise(r => setTimeout(r, 4000));
       }
