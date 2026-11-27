@@ -82,12 +82,64 @@ function outsideLimits(y: number, x?: number, z?: number): boolean {
   return keepLevels.has(y) || (maxDigY !== null && y > maxDigY) || (minDigY !== null && y < minDigY);
 }
 
+
+// ---------- Breadcrumb trail ----------
+// Every few blocks the bot walks, his position is remembered. "Go home" walks the trail back
+// in reverse, which always works because he already walked it (long paths through rock are
+// too far for the pathfinder to plan in one go).
+const trailBots = new WeakSet<object>();
+let trail: Vec3[] = [];
+export function startTrail(bot: mineflayer.Bot): void {
+  if (trailBots.has(bot)) return;
+  trailBots.add(bot);
+  trail = [];
+  const timer = setInterval(() => {
+    if (!bot.entity) return;
+    const p = bot.entity.position.floored();
+    if (home && p.distanceTo(home) <= 4) { trail = [p]; return; }
+    const last = trail[trail.length - 1];
+    if (!last || p.distanceTo(last) >= 3) {
+      trail.push(p);
+      if (trail.length > 3000) trail.splice(0, trail.length - 3000);
+    }
+  }, 700);
+  bot.on('death', () => { trail = []; });
+  bot.on('end', () => clearInterval(timer));
+}
+
+async function walkTrailBack(bot: mineflayer.Bot): Promise<boolean> {
+  if (trail.length < 2) return false;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const movements: any = (bot.pathfinder as any).movements;
+  const crumbs = [...trail].reverse();
+  // start from the crumb nearest to where he is now
+  let start = 0, best = Infinity;
+  crumbs.forEach((c, i) => { const d = c.distanceTo(bot.entity.position); if (d < best) { best = d; start = i; } });
+  let failures = 0;
+  for (let i = start; i < crumbs.length; i += 2) {
+    const c = crumbs[i];
+    if (movements) movements.canDig = false;
+    try {
+      await withTimeout(bot.pathfinder.goto(new goals.GoalNear(c.x, c.y, c.z, 1)), 15000, bot);
+      failures = 0;
+    } catch {
+      if (++failures >= 6) return false;
+    }
+  }
+  return true;
+}
+
 async function goHome(bot: mineflayer.Bot, arrived = 'Back at base with a full bag!'): Promise<void> {
   if (!home) return;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const movements: any = (bot.pathfinder as any).movements;
   try {
-    // Walk back the natural way first (no digging)
+    // Far away (e.g. deep in a mine): retrace the way he came first
+    if (bot.entity.position.distanceTo(home) > 24 && trail.length > 2) {
+      bot.chat('Retracing my steps back to base.');
+      await walkTrailBack(bot);
+    }
+    // Then walk the rest the natural way (no digging)
     await withTimeout(bot.pathfinder.goto(new goals.GoalNear(home.x, home.y, home.z, 2)), 120000, bot);
     bot.chat(arrived);
   } catch {
@@ -929,7 +981,7 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
           let fails = 0;
           let tunnelled = 0;
           const dirIndex = { i: Math.floor(Math.random() * 4) };
-          const MAX_TUNNEL = 400;
+          const MAX_TUNNEL = 160;
           while (job.dug < target && !job.stopRequested) {
             const found = bot.findBlocks({ point: bot.entity.position, matching: ids, maxDistance, count: 128 })
               .filter(p => !skippedAt.has(`${p.x},${p.y},${p.z}`));
