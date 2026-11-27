@@ -82,22 +82,22 @@ function outsideLimits(y: number, x?: number, z?: number): boolean {
   return keepLevels.has(y) || (maxDigY !== null && y > maxDigY) || (minDigY !== null && y < minDigY);
 }
 
-async function goHome(bot: mineflayer.Bot): Promise<void> {
+async function goHome(bot: mineflayer.Bot, arrived = 'Back at base with a full bag!'): Promise<void> {
   if (!home) return;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const movements: any = (bot.pathfinder as any).movements;
   try {
     // Walk back the natural way first (no digging)
     await withTimeout(bot.pathfinder.goto(new goals.GoalNear(home.x, home.y, home.z, 2)), 120000, bot);
-    bot.chat('Back at base with a full bag!');
+    bot.chat(arrived);
   } catch {
     // Only during a dig job: allow digging a way back if there's no open path
     if (movements) movements.canDig = true;
     try {
       await withTimeout(bot.pathfinder.goto(new goals.GoalNear(home.x, home.y, home.z, 2)), 120000, bot);
-      bot.chat('Back at base with a full bag!');
+      bot.chat(arrived);
     } catch {
-      bot.chat("My bag's full but I couldn't find my way back to base.");
+      bot.chat("I couldn't find my way back to base.");
     } finally {
       if (movements) movements.canDig = false;
     }
@@ -613,6 +613,18 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
         }
       })();
       return factory.createResponse(`Started digging stairs ${up ? 'up' : 'down'} towards the ${dir} to Y${targetY}. Check with work-status.`);
+    }
+  );
+
+  factory.registerTool(
+    "go-home",
+    "Walk back to base (the home spot set with set-home). Uses a natural path; digs a way only if there is no path.",
+    {},
+    async () => {
+      const bot = getBot();
+      if (!home) return factory.createResponse('No home set.');
+      await goHome(bot, 'Back at base!');
+      return factory.createResponse(`At base (${home.x}, ${home.y}, ${home.z})`);
     }
   );
 

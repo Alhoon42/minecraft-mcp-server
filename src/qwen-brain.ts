@@ -6,6 +6,7 @@ import * as path from 'path';
 import { ZodType } from 'zod';
 import { ToolFactory } from './tool-factory.js';
 import { log } from './logger.js';
+import { quickCommand } from './quick-commands.js';
 import { resolveBlockNames, applyProtection, stopEverything, jobSummary, isJobRunning } from './tools/work-tools.js';
 
 /*
@@ -32,7 +33,7 @@ const ALLOWED = [
   'work-status', 'craft', 'smelt-item', 'deposit-to-chest', 'withdraw-from-chest', 'eat',
   'place-torch', 'follow-player', 'stop-following', 'sleep', 'wake-up', 'protect-blocks',
   'set-home', 'save-place', 'list-places', 'go-to-place', 'check-chests', 'where-is',
-  'read-signs', 'name-chests-from-signs', 'self-defence', 'attack-nearest', 'sort-into-chests',
+  'go-home', 'read-signs', 'name-chests-from-signs', 'self-defence', 'attack-nearest', 'sort-into-chests',
 ];
 
 // Commands that need the bot's legs: a running background job (digging/mining) is stopped first,
@@ -102,6 +103,14 @@ function patchChat(bot: mineflayer.Bot | null | undefined): void {
     recordEvent(message, replyDepth > 0);
     original(message);
   };
+}
+
+/** Say something as news (not a reply), so a voice app reads it out via /events. */
+function announce(bot: mineflayer.Bot | null | undefined, text: string): void {
+  if (!bot || !text) return;
+  patchChat(bot);
+  const clean = text.replace(/\s+/g, ' ').trim();
+  for (let i = 0; i < clean.length && i < 600; i += 240) bot.chat(clean.slice(i, i + 240));
 }
 
 function sayInGame(bot: mineflayer.Bot | null | undefined, text: string): void {
@@ -316,6 +325,39 @@ ${buildToolList(this.factory)}`;
     this.history = this.history.slice(-8);
 
     let reply = '';
+
+    // Everyday orders: understood instantly without Qwen
+    const quick = quickCommand(bot, player, text);
+    if (quick && bot) {
+      log('info', `Quick command: ${text}`);
+      const say = quick.answer ?? quick.say;
+      if (say) { sayInGame(bot, say); onSay(say); reply = say; }
+      this.history.push({ role: 'assistant', content: JSON.stringify({ say, actions: quick.actions }) });
+      let last = '';
+      for (const a of quick.actions) {
+        if (gen !== this.generation) break;
+        const tool = this.factory.registry.get(a.command);
+        if (!tool) continue;
+        applyProtection(bot);
+        if (TAKES_OVER.has(a.command) && isJobRunning()) {
+          stopEverything(bot);
+          for (let i = 0; i < 25 && isJobRunning(); i++) await new Promise(r => setTimeout(r, 200));
+        }
+        const r = await tool.run(a.args);
+        last = r.content.map(c => c.text).join(' ').replace(/\s+/g, ' ').trim();
+        if (r.isError || /^(no |failed|can't|cannot|unknown|i can't|couldn't)/i.test(last)) {
+          const msg = `Couldn't do that: ${last.slice(0, 180)}`;
+          if (reply) announce(bot, msg); else { sayInGame(bot, msg); onSay(msg); }
+          return msg;
+        }
+      }
+      if (quick.speakResult && last && gen === this.generation) {
+        const short = last.slice(0, 230);
+        if (reply) announce(bot, short); else { sayInGame(bot, short); onSay(short); }
+      }
+      return reply || last;
+    }
+
     try {
       for (let round = 0; round < 3; round++) {
         // Live info goes last so the long fixed prompt at the start stays cached in Ollama
@@ -386,7 +428,7 @@ ${buildToolList(this.factory)}`;
           if (LOOKUPS.has(a.command) || r.isError) needAnswer = true;
           // Tell the player straight away when a command didn't work, instead of standing there
           if (r.isError || /^(no |failed|can't|cannot|unknown|i can't|couldn't|not a command)/i.test(out.trim())) {
-            sayInGame(bot, `Couldn't do that: ${out.replace(/\s+/g, ' ').slice(0, 180)}`);
+            announce(bot, `Couldn't do that: ${out.replace(/\s+/g, ' ').slice(0, 180)}`);
           }
         }
         this.history.push({ role: 'user', content: `Command results:\n${results.join('\n').slice(0, 2000)}` });
