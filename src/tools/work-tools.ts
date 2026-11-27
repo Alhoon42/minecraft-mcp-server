@@ -29,6 +29,13 @@ let currentJob: JobState | null = null;
 // Where the bot goes when its bag is full (set with set-home).
 let home: Vec3 | null = new Vec3(-386, 54, 71);
 
+// Y limits: never dig above maxDigY or below minDigY (null = no limit)
+let maxDigY: number | null = null;
+let minDigY: number | null = null;
+function outsideLimits(y: number): boolean {
+  return (maxDigY !== null && y > maxDigY) || (minDigY !== null && y < minDigY);
+}
+
 async function goHome(bot: mineflayer.Bot): Promise<void> {
   if (!home) return;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -220,6 +227,7 @@ function dropBelow(bot: mineflayer.Bot, pos: Vec3): number {
 }
 
 async function digOne(bot: mineflayer.Bot, pos: Vec3, job: JobState, allowDigPath: boolean): Promise<void> {
+  if (outsideLimits(pos.y)) { job.skipped++; return; }
   // Wait while fighting off a mob
   while (isFighting() && !job.stopRequested) await sleep(300);
   const block = bot.blockAt(pos);
@@ -417,6 +425,10 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
                 bot.chat('Stopped digging stairs: lava or water ahead!');
                 blocked = true; break;
               }
+              if (outsideLimits(p.y) && b.name !== 'air' && b.name !== 'cave_air') {
+                job.message = `Stopped: Y${p.y} is outside the digging limits`;
+                blocked = true; break;
+              }
               if (UNBREAKABLE.has(b.name) || isProtected(b.name)) {
                 job.message = `Stopped: can't break ${b.name}`;
                 blocked = true; break;
@@ -468,6 +480,62 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
         }
       })();
       return factory.createResponse(`Started digging stairs ${up ? 'up' : 'down'} towards the ${dir} to Y${targetY}. Check with work-status.`);
+    }
+  );
+
+  factory.registerTool(
+    "dig-limits",
+    "Set Y levels the bot must never dig outside of, anywhere. E.g. maxY 53 = leave everything above Y 53 alone. Use clear: true to remove the limits.",
+    {
+      maxY: z.coerce.number().int().optional().describe("Highest Y he may dig (blocks above are left alone)"),
+      minY: z.coerce.number().int().optional().describe("Lowest Y he may dig"),
+      clear: z.boolean().optional().describe("Remove all limits"),
+    },
+    async ({ maxY, minY, clear }: { maxY?: number; minY?: number; clear?: boolean }) => {
+      if (clear) { maxDigY = null; minDigY = null; return factory.createResponse('Digging limits removed.'); }
+      if (maxY !== undefined) maxDigY = maxY;
+      if (minY !== undefined) minDigY = minY;
+      return factory.createResponse(`Digging limits: ${maxDigY !== null ? `nothing above Y${maxDigY}` : 'no top limit'}, ${minDigY !== null ? `nothing below Y${minDigY}` : 'no bottom limit'}.`);
+    }
+  );
+
+  factory.registerTool(
+    "dig-inside-markers",
+    "Dig a hole whose corners are marked with marker blocks (default amethyst_block, 'crystal blocks'). Finds the 4 corner markers nearby, then digs everything inside them from the markers' level down to bottomY, layer by layer. Marker blocks and their edge rows are left alone unless includeEdge is true.",
+    {
+      bottomY: z.coerce.number().int().describe("Lowest layer to dig"),
+      topY: z.coerce.number().int().optional().describe("Highest layer to dig (default: the markers' level)"),
+      marker: z.string().optional().describe("Marker block (default amethyst_block)"),
+      includeEdge: z.boolean().optional().describe("Also dig the rows the markers sit on (default false = only inside)"),
+      tossJunk: z.boolean().optional(),
+    },
+    async ({ bottomY, topY, marker = 'amethyst_block', includeEdge = false, tossJunk }: { bottomY: number; topY?: number; marker?: string; includeEdge?: boolean; tossJunk?: boolean }) => {
+      const bot = getBot();
+      const mcData = minecraftData(bot.version);
+      const id = mcData.blocksByName[marker]?.id;
+      if (id === undefined) return factory.createResponse(`Unknown marker block: ${marker}`);
+      const found = bot.findBlocks({ matching: id, maxDistance: 64, count: 256 });
+      // Find the biggest rectangle whose 4 corners are all markers on the same level
+      const key = (x: number, y: number, z: number) => `${x},${y},${z}`;
+      const set = new Set(found.map(p => key(p.x, p.y, p.z)));
+      let best: { minX: number; maxX: number; minZ: number; maxZ: number; y: number; area: number } | null = null;
+      for (const a of found) {
+        for (const b of found) {
+          if (b.y !== a.y || b.x <= a.x || b.z <= a.z) continue;
+          if (!set.has(key(a.x, a.y, b.z)) || !set.has(key(b.x, a.y, a.z))) continue;
+          const area = (b.x - a.x) * (b.z - a.z);
+          if (area >= 4 && (!best || area > best.area)) best = { minX: a.x, maxX: b.x, minZ: a.z, maxZ: b.z, y: a.y, area };
+        }
+      }
+      if (!best) return factory.createResponse(`I can't find 4 ${marker} corners on the same level within 64 blocks.`);
+      const e = includeEdge ? 0 : 1;
+      const box = { x1: best.minX + e, x2: best.maxX - e, z1: best.minZ + e, z2: best.maxZ - e };
+      const dig = factory.registry.get('dig-area');
+      if (!dig) return factory.createResponse('dig-area is missing');
+      const r = await dig.run({ ...box, topY: topY ?? best.y, bottomY, tossJunk,
+        skip: includeEdge ? [{ x: best.minX, z: best.minZ }, { x: best.minX, z: best.maxZ }, { x: best.maxX, z: best.minZ }, { x: best.maxX, z: best.maxZ }] : [] });
+      const text = r.content.map(c => c.text).join(' ');
+      return factory.createResponse(`Markers found at corners (${best.minX},${best.minZ}) to (${best.maxX},${best.maxZ}), Y${best.y}. Digging X ${box.x1}..${box.x2}, Z ${box.z1}..${box.z2}. ${text}`);
     }
   );
 
