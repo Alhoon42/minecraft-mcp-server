@@ -7,7 +7,7 @@ import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
 import { applyProtection } from './work-tools.js';
-import { resolvePlace, recordChest, chestNearPlayer } from './places-tools.js';
+import { resolvePlace, recordChest, chestNearPlayer, chestColumn } from './places-tools.js';
 
 /*
  * Extra everyday commands: craft (reliable, uses a crafting table), chests,
@@ -160,29 +160,37 @@ export function registerExtraTools(factory: ToolFactory, getBot: () => mineflaye
         ? bot.blockAt(new Vec3(x, y, zz))
         : findBlockByName(bot, ['chest', 'trapped_chest', 'barrel'], 32);
       if (!chestBlock) return factory.createResponse('No chest found nearby.');
-      await gotoNear(bot, chestBlock.position, 2);
-      const chest = await bot.openContainer(chestBlock);
+      // A named chest includes the chests stacked below it (sign over a column): fill top first
+      const column = named ? chestColumn(bot, chestBlock.position) : [chestBlock.position.clone()];
       const keep = ['_pickaxe', '_shovel', '_axe', '_sword', '_hoe', 'shears', 'torch', 'bread', 'cooked_', 'apple'];
+      const wanted = () => bot.inventory.items().filter(i =>
+        itemName === 'all' ? !keep.some(k => i.name.includes(k)) : i.name === itemName);
       let stored = 0;
-      try {
-        const items = bot.inventory.items().filter(i =>
-          itemName === 'all' ? !keep.some(k => i.name.includes(k)) : i.name === itemName);
-        for (const it of items) {
-          const amount = (itemName !== 'all' && count !== undefined) ? Math.min(count - stored, it.count) : it.count;
-          if (amount <= 0) break;
-          try {
-            await chest.deposit(it.type, null, amount);
-            stored += amount;
-          } catch (e) {
-            log('warn', `deposit failed: ${e}`);
-            break;
+      let used = 0;
+      for (const cp of column) {
+        if (wanted().length === 0 || (count !== undefined && stored >= count)) break;
+        await gotoNear(bot, cp, 2);
+        const chest = await bot.openContainer(bot.blockAt(cp)!);
+        used++;
+        try {
+          for (const it of wanted()) {
+            const amount = (itemName !== 'all' && count !== undefined) ? Math.min(count - stored, it.count) : it.count;
+            if (amount <= 0) break;
+            try {
+              await chest.deposit(it.type, null, amount);
+              stored += amount;
+            } catch (e) {
+              log('warn', `deposit failed (chest full?): ${e}`);
+              break;
+            }
           }
+        } finally {
+          try { recordChest(cp, chest.containerItems()); } catch {}
+          chest.close();
         }
-      } finally {
-        try { recordChest(chestBlock.position, chest.containerItems()); } catch {}
-        chest.close();
       }
-      return factory.createResponse(`Stored ${stored} item(s) in the chest at (${chestBlock.position.x}, ${chestBlock.position.y}, ${chestBlock.position.z})`);
+      const left = wanted().length > 0 && (count === undefined || stored < count);
+      return factory.createResponse(`Stored ${stored} item(s) in ${used > 1 ? `${used} stacked chests` : 'the chest'} at (${chestBlock.position.x}, ${chestBlock.position.y}, ${chestBlock.position.z})${left ? '. The chests are full, so I kept the rest.' : ''}`);
     }
   );
 
@@ -212,22 +220,37 @@ export function registerExtraTools(factory: ToolFactory, getBot: () => mineflaye
         ? bot.blockAt(new Vec3(x, y, zz))
         : findBlockByName(bot, ['chest', 'trapped_chest', 'barrel'], 32);
       if (!chestBlock) return factory.createResponse('No chest found nearby.');
-      await gotoNear(bot, chestBlock.position, 2);
-      const chest = await bot.openContainer(chestBlock);
-      try {
-        const have = chest.containerItems().filter(i => i.name === itemName);
-        const total = have.reduce((s, i) => s + i.count, 0);
-        if (total === 0) {
-          const what = [...new Set(chest.containerItems().map(i => i.name))].join(', ') || 'nothing';
-          return factory.createResponse(`No ${itemName} in that chest. It has: ${what}`);
+      // A named chest includes the chests stacked below it
+      const column = named ? chestColumn(bot, chestBlock.position) : [chestBlock.position.clone()];
+      let taken = 0;
+      const want = count ?? Infinity;
+      const seen = new Set<string>();
+      for (const cp of column) {
+        if (taken >= want) break;
+        await gotoNear(bot, cp, 2);
+        const chest = await bot.openContainer(bot.blockAt(cp)!);
+        try {
+          for (const i of chest.containerItems()) seen.add(i.name);
+          const have = chest.containerItems().filter(i => i.name === itemName);
+          const total = have.reduce((sum, i) => sum + i.count, 0);
+          if (total === 0) continue;
+          const amount = Math.min(want - taken, total);
+          try {
+            await chest.withdraw(have[0].type, null, amount);
+            taken += amount;
+          } catch (e) {
+            log('warn', `withdraw failed (bag full?): ${e}`);
+            break;
+          }
+        } finally {
+          try { recordChest(cp, chest.containerItems()); } catch {}
+          chest.close();
         }
-        const amount = Math.min(count ?? total, total);
-        await chest.withdraw(have[0].type, null, amount);
-        return factory.createResponse(`Took ${amount} ${itemName} from the chest`);
-      } finally {
-        try { recordChest(chestBlock.position, chest.containerItems()); } catch {}
-        chest.close();
       }
+      if (taken === 0) {
+        return factory.createResponse(`No ${itemName} in ${column.length > 1 ? 'those chests' : 'that chest'}. ${column.length > 1 ? 'They have' : 'It has'}: ${[...seen].join(', ') || 'nothing'}`);
+      }
+      return factory.createResponse(`Took ${taken} ${itemName}`);
     }
   );
 

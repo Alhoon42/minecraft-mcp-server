@@ -104,6 +104,18 @@ export function resolvePlace(name: string, bot?: mineflayer.Bot): Vec3 | null {
   return null;
 }
 
+/** A labelled chest plus every chest stacked directly below it (a sign over a column of chests). */
+export function chestColumn(bot: mineflayer.Bot, top: Vec3): Vec3[] {
+  const ids = containerIds(bot);
+  const out = [top.clone()];
+  for (let i = 1; i <= 8; i++) {
+    const b = bot.blockAt(top.offset(0, -i, 0));
+    if (!b || !ids.includes(b.type)) break;
+    out.push(b.position.clone());
+  }
+  return out;
+}
+
 /** The chest nearest to the nearest player (for "I'm standing on/next to the chest"). */
 export function chestNearPlayer(bot: mineflayer.Bot): Vec3 | null {
   const player = nearestPlayer(bot);
@@ -228,21 +240,26 @@ export function registerPlacesTools(factory: ToolFactory, getBot: () => mineflay
       if (plan.size === 0) return factory.createResponse("Nothing in my bag matches any chest's sign.");
       const lines: string[] = [];
       for (const { chest, label, items } of plan.values()) {
+        let n = 0;
         try {
-          await gotoNear(bot, chest, 2);
-          const c = await bot.openContainer(bot.blockAt(chest)!);
-          let n = 0;
-          try {
-            for (const name of items) {
-              for (const it of bot.inventory.items().filter(i => i.name === name)) {
-                try { await c.deposit(it.type, null, it.count); n += it.count; } catch { break; }
+          // Fill the top chest, then the ones stacked below it
+          for (const cp of chestColumn(bot, chest)) {
+            if (!items.some(name => bot.inventory.items().some(i => i.name === name))) break;
+            await gotoNear(bot, cp, 2);
+            const c = await bot.openContainer(bot.blockAt(cp)!);
+            try {
+              for (const name of items) {
+                for (const it of bot.inventory.items().filter(i => i.name === name)) {
+                  try { await c.deposit(it.type, null, it.count); n += it.count; } catch { break; }
+                }
               }
-            }
-            recordChest(chest, c.containerItems());
-          } finally { c.close(); }
-          lines.push(`${label}: ${n} (${items.join(', ')})`);
+              recordChest(cp, c.containerItems());
+            } finally { c.close(); }
+          }
+          const left = items.some(name => bot.inventory.items().some(i => i.name === name));
+          lines.push(`${label}: ${n} (${items.join(', ')})${left ? ' — chests full, kept the rest' : ''}`);
         } catch (e) {
-          lines.push(`${label}: couldn't use it (${String(e).slice(0, 60)})`);
+          lines.push(`${label}: ${n} stored, then couldn't continue (${String(e).slice(0, 60)})`);
         }
       }
       return factory.createResponse(`Sorted:\n${lines.join('\n')}`);
