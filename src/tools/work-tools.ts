@@ -234,6 +234,31 @@ async function stepBack(bot: mineflayer.Bot): Promise<void> {
   }
 }
 
+
+/**
+ * Turn loose names into real block ids: "diamonds" -> diamond_ore + deepslate_diamond_ore,
+ * "iron ore" -> iron_ore + deepslate_iron_ore, "logs" -> oak_log etc.
+ */
+export function resolveBlockNames(version: string, raw: string): string[] {
+  const mcData = minecraftData(version);
+  const has = (n: string) => mcData.blocksByName[n] !== undefined;
+  let n = raw.trim().toLowerCase().replace(/^minecraft:/, '').replace(/\s+/g, '_');
+  const ORES = ['diamond', 'iron', 'coal', 'gold', 'redstone', 'lapis', 'emerald', 'copper'];
+  const base = n.replace(/s$/, '');
+  if (ORES.includes(n) || ORES.includes(base)) n = `${ORES.includes(n) ? n : base}_ore`;
+  if (n === 'lapis_lazuli_ore') n = 'lapis_ore';
+  if (!has(n) && has(base)) n = base;
+  const out = new Set<string>();
+  if (has(n)) out.add(n);
+  if (n.endsWith('_ore')) {
+    const plain = n.replace(/^deepslate_/, '');
+    if (has(plain)) out.add(plain);
+    if (has(`deepslate_${plain}`)) out.add(`deepslate_${plain}`);
+  }
+  if (out.size === 0 && has(`${n}_ore`)) { out.add(`${n}_ore`); if (has(`deepslate_${n}_ore`)) out.add(`deepslate_${n}_ore`); }
+  return [...out];
+}
+
 function startJob(name: string): JobState {
   currentJob = {
     name,
@@ -374,18 +399,22 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
     "mine-ore",
     "Start a background job that finds and mines a block type nearby (e.g. coal_ore, iron_ore, deepslate_diamond_ore) until it has mined the target number or runs out. Picks up drops and always uses the best tool.",
     {
-      blockType: z.string().describe("Block to mine, e.g. 'coal_ore'. Use 'deepslate_' versions for deep ores."),
+      blockType: z.string().describe("Block to mine, e.g. 'diamond_ore' or just 'diamonds' (deepslate versions are included automatically)"),
       alsoMine: z.array(z.string()).optional().describe("Other block types to count too, e.g. ['deepslate_coal_ore']"),
       target: z.coerce.number().int().positive().describe("How many blocks to mine"),
-      maxDistance: z.coerce.number().optional().describe("Search radius (default 32)"),
+      maxDistance: z.coerce.number().optional().describe("Search radius (default 64)"),
     },
-    async ({ blockType, alsoMine, target, maxDistance = 32 }: { blockType: string; alsoMine?: string[]; target: number; maxDistance?: number }) => {
+    async ({ blockType, alsoMine, target, maxDistance = 64 }: { blockType: string; alsoMine?: string[]; target: number; maxDistance?: number }) => {
       const bot = getBot();
       if (currentJob?.running) {
         return factory.createResponse(`Already running job '${currentJob.name}'. Call stop-work first.`);
       }
       const mcData = minecraftData(bot.version);
-      const names = [blockType, ...(alsoMine ?? [])];
+      // Forgiving names: "diamonds" -> diamond_ore + deepslate_diamond_ore
+      const names = [...new Set([blockType, ...(alsoMine ?? [])].flatMap(n => {
+        const r = resolveBlockNames(bot.version, n);
+        return r.length ? r : [n];
+      }))];
       const ids = names.map(n => mcData.blocksByName[n]?.id).filter((id): id is number => id !== undefined);
       if (ids.length === 0) {
         return factory.createResponse(`Unknown block type: ${blockType}`);

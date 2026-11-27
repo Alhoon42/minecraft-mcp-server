@@ -3,6 +3,7 @@ import * as http from 'http';
 import { ZodType } from 'zod';
 import { ToolFactory } from './tool-factory.js';
 import { log } from './logger.js';
+import { resolveBlockNames } from './tools/work-tools.js';
 
 /*
  * Qwen brain: lets the player talk to the bot directly, without Claude.
@@ -137,6 +138,7 @@ Rules:
 - "give me X"/"throw me X": move-to-position near the player (range 3), then toss-item with lookAt set to the player's position.
 - Never dig straight down. Don't break stone bricks, chests, furnaces, ladders, doors or beds.
 - Item names use Minecraft ids, e.g. coal, raw_iron, oak_log, birch_planks, cobblestone.
+- To get ores (diamonds, iron, coal...), use mine-ore, e.g. {"blockType": "diamond_ore", "target": 10}. Deep versions are included automatically. Diamonds are deep (below Y 0); if none are found, tell the player to send you deeper.
 - If unsure what they mean, ask in "say" and use no actions.
 
 Commands:
@@ -216,6 +218,18 @@ ${buildToolList(this.factory)}`;
           if (!tool || !ALLOWED.includes(a.command)) {
             results.push(`${a.command}: not a command I have`);
             continue;
+          }
+          // Fix loose block names for find-blocks ("diamonds" -> deepslate_diamond_ore etc.)
+          if (a.command === 'find-blocks' && a.args && typeof a.args.blockType === 'string' && bot) {
+            const names = resolveBlockNames(bot.version, a.args.blockType);
+            const dist = Number(a.args.maxDistance ?? 64);
+            const pick = names.find(n => {
+              const id = bot.registry.blocksByName[n]?.id;
+              return id !== undefined && bot.findBlock({ matching: id, maxDistance: dist }) !== null;
+            });
+            if (pick) a.args.blockType = pick;
+            else if (names.length) a.args.blockType = names[0];
+            a.args.maxDistance ??= 64;
           }
           log('info', `Qwen -> ${a.command} ${JSON.stringify(a.args ?? {})}`);
           const r = await tool.run(a.args ?? {});
