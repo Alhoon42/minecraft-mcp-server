@@ -6,7 +6,7 @@ import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
-import { applyProtection } from './work-tools.js';
+import { applyProtection, itemQuery, matchesItem } from './work-tools.js';
 import { resolvePlace, recordChest, chestNearPlayer, chestColumn } from './places-tools.js';
 
 /*
@@ -86,8 +86,10 @@ export function registerExtraTools(factory: ToolFactory, getBot: () => mineflaye
     async ({ item, times = 1 }: { item: string; times?: number }) => {
       const bot = getBot();
       const mcData = minecraftData(bot.version);
-      const itemData = mcData.itemsByName[item];
+      const itemData = mcData.itemsByName[item] ?? mcData.itemsByName[itemQuery(item)]
+        ?? mcData.itemsByName[item.trim().toLowerCase().replace(/\s+/g, '_')];
       if (!itemData) return factory.createResponse(`Unknown item: ${item}`);
+      item = itemData.name;
 
       // Try 2x2 first if possible
       const handRecipes = bot.recipesFor(itemData.id, null, 1, null);
@@ -164,7 +166,7 @@ export function registerExtraTools(factory: ToolFactory, getBot: () => mineflaye
       const column = named ? chestColumn(bot, chestBlock.position) : [chestBlock.position.clone()];
       const keep = ['_pickaxe', '_shovel', '_axe', '_sword', '_hoe', 'shears', 'torch', 'bread', 'cooked_', 'apple'];
       const wanted = () => bot.inventory.items().filter(i =>
-        itemName === 'all' ? !keep.some(k => i.name.includes(k)) : i.name === itemName);
+        itemName === 'all' ? !keep.some(k => i.name.includes(k)) : matchesItem(i.name, itemName));
       let stored = 0;
       let used = 0;
       for (const cp of column) {
@@ -231,7 +233,9 @@ export function registerExtraTools(factory: ToolFactory, getBot: () => mineflaye
         const chest = await bot.openContainer(bot.blockAt(cp)!);
         try {
           for (const i of chest.containerItems()) seen.add(i.name);
-          const have = chest.containerItems().filter(i => i.name === itemName);
+          const exactHave = chest.containerItems().filter(i => i.name === itemName);
+          const matched = exactHave.length ? exactHave : chest.containerItems().filter(i => matchesItem(i.name, itemName));
+          const have = matched.filter(i => i.type === matched[0]?.type);
           const total = have.reduce((sum, i) => sum + i.count, 0);
           if (total === 0) continue;
           const amount = Math.min(want - taken, total);

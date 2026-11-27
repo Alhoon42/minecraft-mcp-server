@@ -417,6 +417,26 @@ export function resolveBlockNames(version: string, raw: string): string[] {
   return [...out];
 }
 
+/**
+ * Loose item names: "sticks" -> stick, "iron pickaxes" -> iron_pickaxe, "iron" matches iron_ingot
+ * and raw_iron, "planks" matches birch_planks etc.
+ */
+export function itemQuery(raw: string): string {
+  let q = raw.trim().toLowerCase().replace(/^minecraft:/, '').replace(/\s+/g, '_');
+  if (q.endsWith('ies')) q = q.slice(0, -3) + 'y';
+  else if (/(ches|shes|xes)$/.test(q)) q = q.slice(0, -2);
+  else if (q.endsWith('s') && !q.endsWith('ss') && q !== 'glass' && q !== 'grass') q = q.slice(0, -1);
+  return q;
+}
+export function matchesItem(name: string, raw: string): boolean {
+  const exact = raw.trim().toLowerCase().replace(/\s+/g, '_');
+  if (name === exact) return true;
+  const q = itemQuery(raw);
+  if (name === q || name === `${q}s`) return true;
+  if (q === 'iron' || q === 'gold' || q === 'copper') return name === `${q}_ingot` || name === `raw_${q}`;
+  return name.endsWith(`_${q}`) || name.endsWith(`_${q}s`) || name.startsWith(`${q}_`);
+}
+
 /** One-line summary of the current job, for the Qwen brain. */
 export function jobSummary(): string {
   if (!currentJob) return 'No job.';
@@ -474,7 +494,9 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
         await stepBack(bot);
         return factory.createResponse(`Dropped ${total} items (kept tools and food)`);
       }
-      const matching = bot.inventory.items().filter(i => i.name === itemName);
+      const exact = bot.inventory.items().filter(i => i.name === itemName);
+      const loose = exact.length ? exact : bot.inventory.items().filter(i => matchesItem(i.name, itemName));
+      const matching = loose.filter(i => i.type === loose[0]?.type);
       if (matching.length === 0) {
         return factory.createResponse(`No ${itemName} in inventory`);
       }
@@ -482,7 +504,7 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
       const amount = Math.min(count ?? have, have);
       await bot.toss(matching[0].type, null, amount);
       await stepBack(bot);
-      return factory.createResponse(`Dropped ${amount} ${itemName}`);
+      return factory.createResponse(`Dropped ${amount} ${matching[0].name}`);
     }
   );
 
