@@ -173,7 +173,7 @@ ${buildToolList(this.factory)}`;
         format: 'json',
         think: false,
         keep_alive: '30m',
-        options: { temperature: 0.2, num_ctx: 8192 },
+        options: { temperature: 0.2 },
       }),
     });
     if (!res.ok) throw new Error(`Ollama said ${res.status}: ${await res.text()}`);
@@ -191,7 +191,7 @@ ${buildToolList(this.factory)}`;
   private async handle(player: string, text: string, onSay: (t: string) => void): Promise<string> {
     const bot = this.getBot();
     this.history.push({ role: 'user', content: `${player}: ${text}` });
-    this.history = this.history.slice(-10);
+    this.history = this.history.slice(-8);
 
     let reply = '';
     try {
