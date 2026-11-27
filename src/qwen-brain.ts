@@ -133,7 +133,9 @@ function saveModel(model: string): void {
 }
 
 // "stop", "claude stop", "stop it", "cancel", "halt", "freeze" (optionally with punctuation)
-const STOP_RE = /^\s*(hey\s+)?(claude(bot)?[\s,]*)?(stop|stop it|stop now|stop that|cancel|halt|freeze|wait)[\s!.]*$/i;
+const STOP_WORDS = /\b(stop|cancel|halt|freeze|abort)\b/i;
+// Short messages containing a stop word: "stop", "okay stop", "stop stop", "Claude, stop it please"
+const STOP_RE = { test: (t: string) => STOP_WORDS.test(t) && t.trim().split(/\s+/).length <= 5 && !/\bstop (using|following|digging|mining)\b/i.test(t) ? true : (/^\s*(wait|hold on)[\s!.]*$/i.test(t)) };
 
 export class QwenBrain {
   private history: Msg[] = [];

@@ -312,6 +312,7 @@ async function digOne(bot: mineflayer.Bot, pos: Vec3, job: JobState, allowDigPat
     try {
       await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)), 15000, bot);
     } catch {
+      if (job.stopRequested) { if (movements) movements.canDig = prevCanDig; return 'failed'; }
       // try again letting the pathfinder dig its own way
       if (movements) movements.canDig = true;
       try {
