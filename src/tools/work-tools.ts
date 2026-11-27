@@ -444,10 +444,21 @@ async function collectDropsAround(bot: mineflayer.Bot, center: Vec3, radius: num
   await sleep(350); // let the drop spawn
   const drops = Object.values(bot.entities).filter(e =>
     e && e.name === 'item' && e.position && e.position.distanceTo(center) <= radius);
-  for (const drop of drops.slice(0, 8)) {
-    try {
-      await withTimeout(bot.pathfinder.goto(new goals.GoalNear(drop.position.x, drop.position.y, drop.position.z, 0)), 6000, bot);
-    } catch { /* unreachable */ }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const movements: any = (bot.pathfinder as any).movements;
+  const prev = movements?.canDig;
+  // The drop often sits in the little hole where the ore was: allow digging one block to reach it
+  if (movements) movements.canDig = true;
+  try {
+    for (const drop of drops.slice(0, 8)) {
+      if (!drop.isValid) continue;
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(drop.position.x, drop.position.y, drop.position.z, 1)), 10000, bot);
+        await sleep(250);
+      } catch { /* unreachable */ }
+    }
+  } finally {
+    if (movements) movements.canDig = prev;
   }
 }
 
