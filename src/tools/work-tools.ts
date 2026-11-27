@@ -287,7 +287,7 @@ function dropBelow(bot: mineflayer.Bot, pos: Vec3): number {
 
 type DigResult = 'dug' | 'empty' | 'limit' | 'protected' | 'lava' | 'water' | 'unreachable' | 'failed';
 
-async function digOne(bot: mineflayer.Bot, pos: Vec3, job: JobState, allowDigPath: boolean): Promise<DigResult> {
+async function digOne(bot: mineflayer.Bot, pos: Vec3, job: JobState, allowDigPath: boolean, digPathMs = 15000): Promise<DigResult> {
   if (outsideLimits(pos.y, pos.x, pos.z) || insideBrickRing(bot, pos)) { job.skipped++; return 'limit'; }
   // Wait while fighting off a mob
   while (isFighting() && !job.stopRequested) await sleep(300);
@@ -316,7 +316,7 @@ async function digOne(bot: mineflayer.Bot, pos: Vec3, job: JobState, allowDigPat
       // try again letting the pathfinder dig its own way
       if (movements) movements.canDig = true;
       try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)), 15000, bot);
+        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)), digPathMs, bot);
       } catch {
         job.skipped++;
         if (movements) movements.canDig = prevCanDig;
@@ -338,6 +338,46 @@ async function digOne(bot: mineflayer.Bot, pos: Vec3, job: JobState, allowDigPat
     job.skipped++;
     return 'failed';
   }
+}
+
+
+/**
+ * Dig a 2-high tunnel straight ahead for `length` blocks (branch mining), turning if blocked by
+ * lava or something protected. Used when no ore is in reach, so the bot explores new rock
+ * in a straight line instead of wandering.
+ */
+async function tunnel(bot: mineflayer.Bot, job: JobState, length: number, dirIndex: { i: number }): Promise<number> {
+  const dirs = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+  let moved = 0, turns = 0;
+  while (moved < length && !job.stopRequested && turns < 4) {
+    while (isFighting() && !job.stopRequested) await sleep(300);
+    const [dx, dz] = dirs[dirIndex.i % 4];
+    const cur = bot.entity.position.floored();
+    const feet = cur.offset(dx, 0, dz), head = cur.offset(dx, 1, dz), floor = cur.offset(dx, -1, dz);
+    const floorBlock = bot.blockAt(floor);
+    const r1 = await digOne(bot, feet, job, false);
+    const r2 = await digOne(bot, head, job, false);
+    const blocked = [r1, r2].some(r => r === 'lava' || r === 'water' || r === 'protected' || r === 'limit')
+      || !floorBlock || floorBlock.name === 'lava' || floorBlock.name === 'air' && dropBelow(bot, floor) > 3;
+    if (blocked) {
+      dirIndex.i++; turns++;
+      if (r1 === 'lava' || r2 === 'lava' || floorBlock?.name === 'lava') bot.chat('Lava ahead in my tunnel, turning.');
+      continue;
+    }
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const movements: any = (bot.pathfinder as any).movements;
+      const prev = movements?.canDig;
+      if (movements) movements.canDig = false;
+      try { await withTimeout(bot.pathfinder.goto(new goals.GoalBlock(feet.x, feet.y, feet.z)), 8000, bot); }
+      finally { if (movements) movements.canDig = prev; }
+      moved++; turns = 0;
+    } catch {
+      dirIndex.i++; turns++;
+    }
+    if (moved % 4 === 0) await collectNearbyDrops(bot, 3);
+  }
+  return moved;
 }
 
 function lavaNear(bot: mineflayer.Bot, pos: Vec3): boolean {
@@ -887,14 +927,28 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
         let lavaSkips = 0, unreachable = 0;
         try {
           let fails = 0;
-          while (job.dug < target && !job.stopRequested && fails < 8) {
+          let tunnelled = 0;
+          const dirIndex = { i: Math.floor(Math.random() * 4) };
+          const MAX_TUNNEL = 400;
+          while (job.dug < target && !job.stopRequested) {
             const found = bot.findBlocks({ point: bot.entity.position, matching: ids, maxDistance, count: 128 })
               .filter(p => !skippedAt.has(`${p.x},${p.y},${p.z}`));
-            if (found.length === 0) {
-              job.message = lavaSkips > 0
-                ? `No more I can safely reach (${lavaSkips} left alone because of lava)`
-                : 'No more found nearby';
-              break;
+            if (found.length === 0 || fails >= 4) {
+              // Nothing reachable here: branch-mine in a straight line into new rock
+              if (tunnelled >= MAX_TUNNEL) {
+                job.message = `Tunnelled ${tunnelled} blocks and found no more`;
+                break;
+              }
+              job.message = `None in reach, tunnelling to find more (${tunnelled} blocks so far)`;
+              if (tunnelled === 0) bot.chat("None in reach here, I'll tunnel along to find more.");
+              const moved = await tunnel(bot, job, 16, dirIndex);
+              tunnelled += moved;
+              fails = 0;
+              if (moved === 0) {
+                job.message = "Stuck: can't tunnel any further from here";
+                break;
+              }
+              continue;
             }
             // nearest first
             found.sort((a, b) => a.distanceTo(bot.entity.position) - b.distanceTo(bot.entity.position));
@@ -909,7 +963,7 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
               }
             }
             job.message = `Mining ${bot.blockAt(pos)?.name} at (${pos.x}, ${pos.y}, ${pos.z})`;
-            const res = await digOne(bot, pos, job, true);
+            const res = await digOne(bot, pos, job, true, 90000);
             if (res === 'dug') {
               fails = 0;
               await collectDropsAround(bot, pos, 6);
@@ -934,7 +988,6 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
           } else if (job.stopRequested) {
             job.message = `Stopped by you after mining ${job.dug}. Picked up ${got}.`;
           } else if (!job.message.startsWith('Paused')) {
-            if (fails >= 8) job.message = `Couldn't reach the rest (${unreachable} unreachable)`;
             job.message = `Stopped after mining ${job.dug}: ${job.message}. Picked up ${got}.`;
             bot.chat(job.message);
           }
