@@ -60,7 +60,8 @@ function buildToolList(factory: ToolFactory): string {
   for (const name of ALLOWED) {
     const t = factory.registry.get(name);
     if (!t) continue;
-    lines.push(`- ${name}: ${t.description} Args: ${describeSchema(t.schema)}`);
+    const short = t.description.split(/(?<=\.)\s/)[0];
+    lines.push(`- ${name}: ${short} Args: ${describeSchema(t.schema)}`);
   }
   return lines.join('\n');
 }
@@ -87,6 +88,15 @@ export class QwenBrain {
   start(): void {
     if (this.config.httpPort > 0) this.startHttp();
     log('info', `Qwen brain ${this.enabled ? 'on' : 'off'} (model ${this.config.model})`);
+    // Warm up: load Qwen into the graphics card and pre-read the long fixed prompt,
+    // so the first real message is quick.
+    if (this.enabled) {
+      setTimeout(() => {
+        this.askQwen([{ role: 'system', content: this.systemPrompt() }, { role: 'user', content: 'Player: hi (warm-up, reply briefly)' }])
+          .then(() => log('info', 'Qwen warmed up'))
+          .catch(e => log('warn', `Qwen warm-up failed: ${e}`));
+      }, 3000);
+    }
   }
 
   /** Called for every chat message from a player (not the bot itself). */
@@ -99,13 +109,42 @@ export class QwenBrain {
     this.enqueue(username, m).catch(() => {});
   }
 
+  /**
+   * Queue a message. Resolves with the bot's first spoken reply as soon as Qwen gives one,
+   * while the commands keep running afterwards (so voice apps aren't kept waiting).
+   */
   private enqueue(player: string, text: string): Promise<string> {
-    const job = this.queue.then(() => this.handle(player, text));
+    let firstSay: (t: string) => void = () => {};
+    const replied = new Promise<string>(r => { firstSay = r; });
+    const job = this.queue.then(() => this.handle(player, text, firstSay));
     this.queue = job.catch(() => {});
-    return job;
+    job.then(r => firstSay(r), () => firstSay(''));
+    return replied;
   }
 
-  private systemPrompt(player: string): string {
+  private cachedSystem = '';
+
+  /** Fixed part of the prompt. Kept identical between calls so Ollama can reuse it (much faster). */
+  private systemPrompt(): string {
+    if (this.cachedSystem) return this.cachedSystem;
+    this.cachedSystem = `You are ClaudeBot, a friendly Minecraft helper bot. The player talks to you; their name and position are given with each message.
+Turn what they say into commands for yourself. Reply ONLY with JSON like:
+{"say": "short friendly reply (under 15 words)", "actions": [{"command": "name", "args": {...}}]}
+Use "actions": [] when no command is needed (chatting, or answering from command results).
+Rules:
+- Only use commands from the list, with the exact arg names.
+- "come here"/"come to me": move-to-position with the player's position and range 2.
+- "give me X"/"throw me X": move-to-position near the player (range 3), then toss-item with lookAt set to the player's position.
+- Never dig straight down. Don't break stone bricks, chests, furnaces, ladders, doors or beds.
+- Item names use Minecraft ids, e.g. coal, raw_iron, oak_log, birch_planks, cobblestone.
+- If unsure what they mean, ask in "say" and use no actions.
+
+Commands:
+${buildToolList(this.factory)}`;
+    return this.cachedSystem;
+  }
+
+  private context(player: string): string {
     const bot = this.getBot();
     let context = '';
     if (bot?.entity) {
@@ -120,21 +159,7 @@ export class QwenBrain {
       context += `Your inventory: ${inv || 'empty'}.\n`;
       context += `Health ${Math.round(bot.health)}/20, food ${Math.round(bot.food)}/20.\n`;
     }
-    return `You are ClaudeBot, a friendly Minecraft helper bot. ${player} is the player talking to you.
-Turn what they say into commands for yourself. Reply ONLY with JSON like:
-{"say": "short friendly reply (under 20 words)", "actions": [{"command": "name", "args": {...}}]}
-Use "actions": [] when no command is needed (chatting, or answering from command results).
-Rules:
-- Only use commands from the list, with the exact arg names.
-- "come here"/"come to me": move-to-position with ${player}'s position and range 2.
-- "give me X"/"throw me X": move-to-position near ${player} (range 3), then toss-item with lookAt set to ${player}'s position.
-- Never dig straight down. Don't break stone bricks, chests, furnaces, ladders, doors or beds.
-- Item names use Minecraft ids, e.g. coal, raw_iron, oak_log, birch_planks, cobblestone.
-- If unsure what they mean, ask in "say" and use no actions.
-
-${context}
-Commands:
-${buildToolList(this.factory)}`;
+    return context;
   }
 
   private async askQwen(messages: Msg[]): Promise<Plan> {
@@ -148,7 +173,7 @@ ${buildToolList(this.factory)}`;
         format: 'json',
         think: false,
         keep_alive: '30m',
-        options: { temperature: 0.2 },
+        options: { temperature: 0.2, num_ctx: 8192 },
       }),
     });
     if (!res.ok) throw new Error(`Ollama said ${res.status}: ${await res.text()}`);
@@ -163,17 +188,23 @@ ${buildToolList(this.factory)}`;
     }
   }
 
-  private async handle(player: string, text: string): Promise<string> {
+  private async handle(player: string, text: string, onSay: (t: string) => void): Promise<string> {
     const bot = this.getBot();
     this.history.push({ role: 'user', content: `${player}: ${text}` });
-    this.history = this.history.slice(-12);
+    this.history = this.history.slice(-10);
 
     let reply = '';
     try {
       for (let round = 0; round < 3; round++) {
-        const plan = await this.askQwen([{ role: 'system', content: this.systemPrompt(player) }, ...this.history]);
+        // Live info goes last so the long fixed prompt at the start stays cached in Ollama
+        const live: Msg = { role: 'user', content: `[Current info]\n${this.context(player)}` };
+        const plan = await this.askQwen([{ role: 'system', content: this.systemPrompt() }, ...this.history, live]);
         this.history.push({ role: 'assistant', content: JSON.stringify(plan) });
-        if (plan.say) { reply = plan.say; sayInGame(bot, plan.say); }
+        if (plan.say) {
+          reply = plan.say;
+          sayInGame(bot, plan.say);
+          onSay(plan.say);
+        }
 
         const actions = Array.isArray(plan.actions) ? plan.actions.slice(0, 5) : [];
         if (actions.length === 0) break;
@@ -192,7 +223,7 @@ ${buildToolList(this.factory)}`;
           results.push(`${a.command}: ${out}`);
           if (LOOKUPS.has(a.command) || r.isError) needAnswer = true;
         }
-        this.history.push({ role: 'user', content: `Command results:\n${results.join('\n').slice(0, 3000)}` });
+        this.history.push({ role: 'user', content: `Command results:\n${results.join('\n').slice(0, 2000)}` });
         if (!needAnswer) break;
       }
     } catch (e) {
@@ -201,6 +232,7 @@ ${buildToolList(this.factory)}`;
         : `Qwen problem: ${String(e).slice(0, 150)}`;
       log('warn', msg);
       sayInGame(bot, msg);
+      onSay(msg);
       return msg;
     }
     return reply;
