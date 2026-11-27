@@ -60,6 +60,28 @@ const norm = (name: string) => name.toLowerCase()
   .trim();
 const key = (p: { x: number; y: number; z: number }) => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
 
+
+/**
+ * Which chest a sign labels: a wall sign stuck on the front of a chest (sorting walls),
+ * else the chest directly below the sign, else the closest chest within 2 blocks.
+ */
+function chestForSign(bot: mineflayer.Bot, sp: Vec3) {
+  const ids = containerIds(bot);
+  const sign = bot.blockAt(sp);
+  if (sign && sign.name.includes('wall')) {
+    const facing = String((sign.getProperties() as Record<string, unknown>).facing ?? '');
+    const back: Record<string, [number, number]> = { north: [0, 1], south: [0, -1], east: [-1, 0], west: [1, 0] };
+    const d = back[facing];
+    if (d) {
+      const behind = bot.blockAt(sp.offset(d[0], 0, d[1]));
+      if (behind && ids.includes(behind.type)) return behind;
+    }
+  }
+  const below = bot.blockAt(sp.offset(0, -1, 0));
+  if (below && ids.includes(below.type)) return below;
+  return bot.findBlock({ matching: ids, maxDistance: 2, point: sp });
+}
+
 export function resolvePlace(name: string, bot?: mineflayer.Bot): Vec3 | null {
   const m = load();
   const want = norm(name);
@@ -71,10 +93,7 @@ export function resolvePlace(name: string, bot?: mineflayer.Bot): Vec3 | null {
     const signs = bot.findBlocks({ matching: signIds(bot), maxDistance: 48, count: 100 });
     for (const sp of signs) {
       if (norm(signText(bot.blockAt(sp)).replace(/ \/ /g, ' ')) !== want) continue;
-      const below = bot.blockAt(sp.offset(0, -1, 0));
-      const chest = (below && containerIds(bot).includes(below.type))
-        ? below
-        : bot.findBlock({ matching: containerIds(bot), maxDistance: 2, point: sp });
+      const chest = chestForSign(bot, sp);
       if (!chest) continue;
       const c = chest.position;
       m.places[want] = { x: c.x, y: c.y, z: c.z };
@@ -178,6 +197,59 @@ function signText(block: any): string {
 
 export function registerPlacesTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
   factory.registerTool(
+    "sort-into-chests",
+    "Put items into the chests whose signs name them (e.g. a 'Dirt' sign = dirt chest, 'Cobblestone' or 'Cobble' = cobblestone, 'Iron' = raw_iron and iron_ingot). Keeps tools, torches and food. Anything without a matching chest stays in the bag.",
+    {},
+    async () => {
+      const bot = getBot();
+      const signs = bot.findBlocks({ matching: signIds(bot), maxDistance: 32, count: 100 });
+      const targets: { words: string[]; label: string; chest: Vec3 }[] = [];
+      for (const sp of signs) {
+        const text = signText(bot.blockAt(sp)).replace(/ \/ /g, ' ');
+        const chest = text ? chestForSign(bot, sp) : null;
+        if (!chest) continue;
+        const words = norm(text).split(' ').filter(w => w.length > 2 && !/^\d+$/.test(w) && w !== 'chest')
+          .map(w => w.replace(/s$/, '').replace(/^cobble$/, 'cobblestone'));
+        if (words.length) targets.push({ words, label: text, chest: chest.position.clone() });
+      }
+      if (targets.length === 0) return factory.createResponse('No signs on chests that name items.');
+      const keep = ['_pickaxe', '_shovel', '_axe', '_sword', '_hoe', 'shears', 'torch', 'bread', 'cooked_', 'apple'];
+      // group the bag by target chest
+      const plan = new Map<string, { chest: Vec3; label: string; items: string[] }>();
+      for (const it of bot.inventory.items()) {
+        if (keep.some(k => it.name.includes(k))) continue;
+        const parts = it.name.split('_');
+        const t = targets.find(tg => tg.words.every(w => parts.some(p => p.replace(/s$/, '') === w) || it.name === w));
+        if (!t) continue;
+        const k = `${t.chest.x},${t.chest.y},${t.chest.z}`;
+        if (!plan.has(k)) plan.set(k, { chest: t.chest, label: t.label, items: [] });
+        if (!plan.get(k)!.items.includes(it.name)) plan.get(k)!.items.push(it.name);
+      }
+      if (plan.size === 0) return factory.createResponse("Nothing in my bag matches any chest's sign.");
+      const lines: string[] = [];
+      for (const { chest, label, items } of plan.values()) {
+        try {
+          await gotoNear(bot, chest, 2);
+          const c = await bot.openContainer(bot.blockAt(chest)!);
+          let n = 0;
+          try {
+            for (const name of items) {
+              for (const it of bot.inventory.items().filter(i => i.name === name)) {
+                try { await c.deposit(it.type, null, it.count); n += it.count; } catch { break; }
+              }
+            }
+            recordChest(chest, c.containerItems());
+          } finally { c.close(); }
+          lines.push(`${label}: ${n} (${items.join(', ')})`);
+        } catch (e) {
+          lines.push(`${label}: couldn't use it (${String(e).slice(0, 60)})`);
+        }
+      }
+      return factory.createResponse(`Sorted:\n${lines.join('\n')}`);
+    }
+  );
+
+  factory.registerTool(
     "read-signs",
     "Read the text on all signs within range (default 16 blocks).",
     { maxDistance: z.coerce.number().optional() },
@@ -204,11 +276,7 @@ export function registerPlacesTools(factory: ToolFactory, getBot: () => mineflay
       for (const sp of signs) {
         const text = signText(bot.blockAt(sp)).replace(/ \/ /g, ' ');
         if (!text) continue;
-        // Sign directly above a chest wins; otherwise the closest chest within 2 blocks
-        const below = bot.blockAt(sp.offset(0, -1, 0));
-        const chest = (below && containerIds(bot).includes(below.type))
-          ? below
-          : bot.findBlock({ matching: containerIds(bot), maxDistance: 2, point: sp });
+        const chest = chestForSign(bot, sp);
         if (!chest) continue;
         const p = chest.position;
         load().places[norm(text)] = { x: p.x, y: p.y, z: p.z };
