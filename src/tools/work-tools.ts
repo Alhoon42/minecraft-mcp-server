@@ -25,6 +25,7 @@ type JobState = {
   skipped: number;
   message: string;
   startedAt: number;
+  lava?: number;
 };
 
 let currentJob: JobState | null = null;
@@ -244,19 +245,22 @@ function dropBelow(bot: mineflayer.Bot, pos: Vec3): number {
   return depth;
 }
 
-async function digOne(bot: mineflayer.Bot, pos: Vec3, job: JobState, allowDigPath: boolean): Promise<void> {
-  if (outsideLimits(pos.y)) { job.skipped++; return; }
+type DigResult = 'dug' | 'empty' | 'limit' | 'protected' | 'lava' | 'water' | 'unreachable' | 'failed';
+
+async function digOne(bot: mineflayer.Bot, pos: Vec3, job: JobState, allowDigPath: boolean): Promise<DigResult> {
+  if (outsideLimits(pos.y)) { job.skipped++; return 'limit'; }
   // Wait while fighting off a mob
   while (isFighting() && !job.stopRequested) await sleep(300);
   const block = bot.blockAt(pos);
-  if (!block || block.name === 'air' || block.name === 'cave_air' || block.name === 'void_air') return;
+  if (!block || block.name === 'air' || block.name === 'cave_air' || block.name === 'void_air') return 'empty';
+  if (block.name === 'lava') { job.skipped++; return 'lava'; }
   if (UNBREAKABLE.has(block.name) || DANGER.has(block.name) || isProtected(block.name)) {
     job.skipped++;
-    return;
+    return 'protected';
   }
   if (touchesDanger(bot, pos)) {
     job.skipped++;
-    return;
+    return lavaNear(bot, pos) ? 'lava' : 'water';
   }
 
   const eye = bot.entity.position.offset(0, bot.entity.height ?? 1.62, 0);
@@ -275,22 +279,60 @@ async function digOne(bot: mineflayer.Bot, pos: Vec3, job: JobState, allowDigPat
       } catch {
         job.skipped++;
         if (movements) movements.canDig = prevCanDig;
-        return;
+        return 'unreachable';
       }
     }
     if (movements) movements.canDig = prevCanDig;
   }
 
   const fresh = bot.blockAt(pos);
-  if (!fresh || fresh.name === 'air') return;
+  if (!fresh || fresh.name === 'air') return 'empty';
   await equipBestTool(bot, fresh);
   try {
     await bot.dig(fresh, true);
     job.dug++;
+    return 'dug';
   } catch (e) {
     log('warn', `dig failed at ${pos}: ${e}`);
     job.skipped++;
+    return 'failed';
   }
+}
+
+function lavaNear(bot: mineflayer.Bot, pos: Vec3): boolean {
+  for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 2; dy++) for (let dz = -2; dz <= 2; dz++) {
+    if (bot.blockAt(pos.offset(dx, dy, dz))?.name === 'lava') return true;
+  }
+  return false;
+}
+
+/** Walk over item drops around a spot so they get picked up. */
+async function collectDropsAround(bot: mineflayer.Bot, center: Vec3, radius: number): Promise<void> {
+  await sleep(350); // let the drop spawn
+  const drops = Object.values(bot.entities).filter(e =>
+    e && e.name === 'item' && e.position && e.position.distanceTo(center) <= radius);
+  for (const drop of drops.slice(0, 8)) {
+    try {
+      await withTimeout(bot.pathfinder.goto(new goals.GoalNear(drop.position.x, drop.position.y, drop.position.z, 0)), 6000, bot);
+    } catch { /* unreachable */ }
+  }
+}
+
+function countItems(bot: mineflayer.Bot): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const i of bot.inventory.items()) m.set(i.name, (m.get(i.name) ?? 0) + i.count);
+  return m;
+}
+
+/** What the bot has gained since `before` (ignoring stone and other junk). */
+function gainedSince(bot: mineflayer.Bot, before: Map<string, number>): string {
+  const junk = new Set(['cobblestone', 'cobbled_deepslate', 'dirt', 'gravel', 'netherrack', 'tuff', 'andesite', 'diorite', 'granite', 'stone', 'deepslate', 'flint']);
+  const out: string[] = [];
+  for (const [name, n] of countItems(bot)) {
+    const diff = n - (before.get(name) ?? 0);
+    if (diff > 0 && !junk.has(name)) out.push(`${diff} ${name}`);
+  }
+  return out.length ? out.join(', ') : 'nothing useful';
 }
 
 // Walk backwards for a moment so the bot doesn't pick its own drops back up
@@ -647,14 +689,17 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
                   }
                 }
                 job.message = `Digging Y${y}, row Z${zz}`;
-                await digOne(bot, pos, job, false);
+                if (await digOne(bot, pos, job, false) === 'lava') {
+                  job.lava = (job.lava ?? 0) + 1;
+                  if (job.lava === 1) bot.chat(`Lava near (${pos.x}, ${pos.y}, ${pos.z}), leaving those blocks and carrying on.`);
+                }
               }
               await collectNearbyDrops(bot, 6);
             }
           }
           if (!job.stopRequested) {
-            job.message = `Finished: dug ${job.dug} blocks, skipped ${job.skipped}`;
-            bot.chat(`Big hole done! Dug ${job.dug} blocks.`);
+            job.message = `Finished: dug ${job.dug} blocks, skipped ${job.skipped}${job.lava ? ` (${job.lava} because of lava)` : ''}`;
+            bot.chat(`Big hole done! Dug ${job.dug} blocks.${job.lava ? ` Left ${job.lava} alone because of lava.` : ''}`);
           } else if (!job.message.startsWith('Paused')) {
             job.message = `Stopped: dug ${job.dug}, skipped ${job.skipped}`;
           }
@@ -698,13 +743,18 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
       const job = startJob(`mine-ore ${names.join('/')} x${target}`);
 
       (async () => {
+        const startItems = countItems(bot);
+        const skippedAt = new Set<string>();
+        let lavaSkips = 0, unreachable = 0;
         try {
-          let misses = 0;
-          while (job.dug < target && !job.stopRequested && misses < 3) {
-            const found = bot.findBlocks({ point: bot.entity.position, matching: ids, maxDistance, count: 64 });
+          let fails = 0;
+          while (job.dug < target && !job.stopRequested && fails < 8) {
+            const found = bot.findBlocks({ point: bot.entity.position, matching: ids, maxDistance, count: 128 })
+              .filter(p => !skippedAt.has(`${p.x},${p.y},${p.z}`));
             if (found.length === 0) {
-              misses++;
-              job.message = 'No more found nearby';
+              job.message = lavaSkips > 0
+                ? `No more I can safely reach (${lavaSkips} left alone because of lava)`
+                : 'No more found nearby';
               break;
             }
             // nearest first
@@ -720,21 +770,39 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
               }
             }
             job.message = `Mining ${bot.blockAt(pos)?.name} at (${pos.x}, ${pos.y}, ${pos.z})`;
-            const before = job.dug;
-            await digOne(bot, pos, job, true);
-            if (job.dug === before) misses++;
-            else misses = 0;
-            await collectNearbyDrops(bot, 5);
+            const res = await digOne(bot, pos, job, true);
+            if (res === 'dug') {
+              fails = 0;
+              await collectDropsAround(bot, pos, 6);
+            } else {
+              // Don't keep trying the same block
+              skippedAt.add(`${pos.x},${pos.y},${pos.z}`);
+              if (res === 'lava') {
+                lavaSkips++;
+                if (lavaSkips === 1) bot.chat(`Lava next to a ${bot.blockAt(pos)?.name ?? 'block'} at (${pos.x}, ${pos.y}, ${pos.z}), leaving it and trying another.`);
+              } else if (res === 'unreachable') {
+                unreachable++;
+                fails++;
+              } else if (res !== 'empty') {
+                fails++;
+              }
+            }
           }
+          const got = gainedSince(bot, startItems);
           if (job.dug >= target) {
-            job.message = `Finished: mined ${job.dug}`;
-            bot.chat(`Done! Mined ${job.dug} ${blockType}.`);
+            job.message = `Finished: mined ${job.dug}, picked up ${got}`;
+            bot.chat(`Done! Mined ${job.dug} blocks and picked up ${got}.`);
+          } else if (job.stopRequested) {
+            job.message = `Stopped by you after mining ${job.dug}. Picked up ${got}.`;
           } else if (!job.message.startsWith('Paused')) {
-            job.message = `Stopped after mining ${job.dug} (${job.message})`;
+            if (fails >= 8) job.message = `Couldn't reach the rest (${unreachable} unreachable)`;
+            job.message = `Stopped after mining ${job.dug}: ${job.message}. Picked up ${got}.`;
+            bot.chat(job.message);
           }
         } catch (e) {
           job.message = `Error: ${e}`;
           log('error', `mine-ore failed: ${e}`);
+          bot.chat(`Something went wrong while mining: ${String(e).slice(0, 100)}`);
         } finally {
           job.running = false;
         }
