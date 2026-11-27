@@ -7,6 +7,7 @@ import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
 import { applyProtection } from './work-tools.js';
+import { resolvePlace, recordChest } from './places-tools.js';
 
 /*
  * Extra everyday commands: craft (reliable, uses a crafting table), chests,
@@ -135,10 +136,18 @@ export function registerExtraTools(factory: ToolFactory, getBot: () => mineflaye
       itemName: z.string().describe("Item to store, or 'all'"),
       count: z.coerce.number().int().positive().optional().describe("How many (default: all of that item)"),
       x: z.coerce.number().optional(), y: z.coerce.number().optional(), z: z.coerce.number().optional(),
+      place: z.string().optional().describe("Named place, e.g. 'chest 1' (see save-place)"),
     },
-    async ({ itemName, count, x, y, z: zz }: { itemName: string; count?: number; x?: number; y?: number; z?: number }) => {
+    async ({ itemName, count, x, y, z: zz, place }: { itemName: string; count?: number; x?: number; y?: number; z?: number; place?: string }) => {
       const bot = getBot();
-      const chestBlock = (x !== undefined && y !== undefined && zz !== undefined)
+      let named: Vec3 | null = null;
+      if (place) {
+        named = resolvePlace(place);
+        if (!named) return factory.createResponse(`No place called "${place}". Use list-places.`);
+      }
+      const chestBlock = named
+        ? bot.blockAt(named)
+        : (x !== undefined && y !== undefined && zz !== undefined)
         ? bot.blockAt(new Vec3(x, y, zz))
         : findBlockByName(bot, ['chest', 'trapped_chest', 'barrel'], 32);
       if (!chestBlock) return factory.createResponse('No chest found nearby.');
@@ -161,6 +170,7 @@ export function registerExtraTools(factory: ToolFactory, getBot: () => mineflaye
           }
         }
       } finally {
+        try { recordChest(chestBlock.position, chest.containerItems()); } catch {}
         chest.close();
       }
       return factory.createResponse(`Stored ${stored} item(s) in the chest at (${chestBlock.position.x}, ${chestBlock.position.y}, ${chestBlock.position.z})`);
@@ -174,10 +184,18 @@ export function registerExtraTools(factory: ToolFactory, getBot: () => mineflaye
       itemName: z.string().describe("Item to take"),
       count: z.coerce.number().int().positive().optional().describe("How many (default: all)"),
       x: z.coerce.number().optional(), y: z.coerce.number().optional(), z: z.coerce.number().optional(),
+      place: z.string().optional().describe("Named place, e.g. 'chest 1' (see save-place)"),
     },
-    async ({ itemName, count, x, y, z: zz }: { itemName: string; count?: number; x?: number; y?: number; z?: number }) => {
+    async ({ itemName, count, x, y, z: zz, place }: { itemName: string; count?: number; x?: number; y?: number; z?: number; place?: string }) => {
       const bot = getBot();
-      const chestBlock = (x !== undefined && y !== undefined && zz !== undefined)
+      let named: Vec3 | null = null;
+      if (place) {
+        named = resolvePlace(place);
+        if (!named) return factory.createResponse(`No place called "${place}". Use list-places.`);
+      }
+      const chestBlock = named
+        ? bot.blockAt(named)
+        : (x !== undefined && y !== undefined && zz !== undefined)
         ? bot.blockAt(new Vec3(x, y, zz))
         : findBlockByName(bot, ['chest', 'trapped_chest', 'barrel'], 32);
       if (!chestBlock) return factory.createResponse('No chest found nearby.');
@@ -186,11 +204,15 @@ export function registerExtraTools(factory: ToolFactory, getBot: () => mineflaye
       try {
         const have = chest.containerItems().filter(i => i.name === itemName);
         const total = have.reduce((s, i) => s + i.count, 0);
-        if (total === 0) return factory.createResponse(`No ${itemName} in that chest.`);
+        if (total === 0) {
+          const what = [...new Set(chest.containerItems().map(i => i.name))].join(', ') || 'nothing';
+          return factory.createResponse(`No ${itemName} in that chest. It has: ${what}`);
+        }
         const amount = Math.min(count ?? total, total);
         await chest.withdraw(have[0].type, null, amount);
         return factory.createResponse(`Took ${amount} ${itemName} from the chest`);
       } finally {
+        try { recordChest(chestBlock.position, chest.containerItems()); } catch {}
         chest.close();
       }
     }
@@ -223,6 +245,7 @@ export function registerExtraTools(factory: ToolFactory, getBot: () => mineflaye
     "Place a torch at x,y,z (on the floor or on a wall next to it), or on the floor next to the bot if no position given.",
     {
       x: z.coerce.number().optional(), y: z.coerce.number().optional(), z: z.coerce.number().optional(),
+      place: z.string().optional().describe("Named place, e.g. 'chest 1' (see save-place)"),
     },
     async ({ x, y, z: zz }: { x?: number; y?: number; z?: number }) => {
       const bot = getBot();
