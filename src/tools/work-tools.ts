@@ -243,6 +243,13 @@ export function resolveBlockNames(version: string, raw: string): string[] {
   const mcData = minecraftData(version);
   const has = (n: string) => mcData.blocksByName[n] !== undefined;
   let n = raw.trim().toLowerCase().replace(/^minecraft:/, '').replace(/\s+/g, '_');
+  // Trees / wood / logs -> every kind of log (oak, birch, spruce...)
+  if (['tree', 'trees', 'wood', 'woods', 'log', 'logs', 'timber'].includes(n)) {
+    return Object.keys(mcData.blocksByName).filter(b => b.endsWith('_log') && !b.startsWith('stripped_'));
+  }
+  // "birch tree", "oak wood" -> birch_log, oak_log
+  const treeKind = n.match(/^([a-z_]+?)_(tree|trees|wood|logs?)$/);
+  if (treeKind && has(`${treeKind[1]}_log`)) return [`${treeKind[1]}_log`];
   const ORES = ['diamond', 'iron', 'coal', 'gold', 'redstone', 'lapis', 'emerald', 'copper'];
   const base = n.replace(/s$/, '');
   if (ORES.includes(n) || ORES.includes(base)) n = `${ORES.includes(n) ? n : base}_ore`;

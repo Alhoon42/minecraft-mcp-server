@@ -139,6 +139,7 @@ Rules:
 - Never dig straight down. Don't break stone bricks, chests, furnaces, ladders, doors or beds.
 - Item names use Minecraft ids, e.g. coal, raw_iron, oak_log, birch_planks, cobblestone.
 - To get ores (diamonds, iron, coal...), use mine-ore, e.g. {"blockType": "diamond_ore", "target": 10}. Deep versions are included automatically. Diamonds are deep (below Y 0); if none are found, tell the player to send you deeper.
+- For wood, use mine-ore with {"blockType": "trees", "target": 20} (finds every kind of log). Trees are on the surface, so if you're underground and none are found, say so.
 - If unsure what they mean, ask in "say" and use no actions.
 
 Commands:
