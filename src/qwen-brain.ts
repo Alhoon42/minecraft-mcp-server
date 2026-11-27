@@ -29,7 +29,7 @@ const ALLOWED = [
   'work-status', 'craft', 'smelt-item', 'deposit-to-chest', 'withdraw-from-chest', 'eat',
   'place-torch', 'follow-player', 'stop-following', 'sleep', 'wake-up', 'protect-blocks',
   'set-home', 'save-place', 'list-places', 'go-to-place', 'check-chests', 'where-is',
-  'read-signs', 'name-chests-from-signs',
+  'read-signs', 'name-chests-from-signs', 'self-defence', 'attack-nearest',
 ];
 
 // Commands that just look things up: their results are fed back so Qwen can answer questions

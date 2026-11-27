@@ -21,6 +21,7 @@ import { registerWorkTools } from './tools/work-tools.js';
 import { registerExtraTools } from './tools/extra-tools.js';
 import { registerPlacesTools } from './tools/places-tools.js';
 import { QwenBrain } from './qwen-brain.js';
+import { registerDefenceTools } from './tools/defense-tools.js';
 
 setupStdioFiltering();
 
@@ -70,6 +71,7 @@ async function main() {
   registerWorkTools(factory, getBot);
   registerExtraTools(factory, getBot);
   registerPlacesTools(factory, getBot);
+  registerDefenceTools(factory, getBot);
 
   brain = new QwenBrain(factory, () => connection.getBot(), {
     enabled: config.brain,

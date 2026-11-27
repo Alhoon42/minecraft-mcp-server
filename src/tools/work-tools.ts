@@ -6,6 +6,7 @@ import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
+import { isFighting } from './defense-tools.js';
 
 /*
  * Long-running "jobs" (dig-area, mine-ore) run in the background so the bot keeps
@@ -218,6 +219,8 @@ function dropBelow(bot: mineflayer.Bot, pos: Vec3): number {
 }
 
 async function digOne(bot: mineflayer.Bot, pos: Vec3, job: JobState, allowDigPath: boolean): Promise<void> {
+  // Wait while fighting off a mob
+  while (isFighting() && !job.stopRequested) await sleep(300);
   const block = bot.blockAt(pos);
   if (!block || block.name === 'air' || block.name === 'cave_air' || block.name === 'void_air') return;
   if (UNBREAKABLE.has(block.name) || DANGER.has(block.name) || isProtected(block.name)) {
@@ -385,6 +388,7 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
         try {
           let steps = 0;
           while (!job.stopRequested) {
+            while (isFighting() && !job.stopRequested) await sleep(300);
             const cur = bot.entity.position.floored();
             if (cur.y === targetY) break;
             const next = cur.offset(dx, up ? 1 : -1, dz);
