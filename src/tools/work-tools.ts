@@ -6,7 +6,8 @@ import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
-import { isFighting } from './defense-tools.js';
+import { isFighting, cancelFight } from './defense-tools.js';
+import { stopFollowing } from './extra-tools.js';
 
 /*
  * Long-running "jobs" (dig-area, mine-ore) run in the background so the bot keeps
@@ -306,6 +307,17 @@ export function resolveBlockNames(version: string, raw: string): string[] {
   }
   if (out.size === 0 && has(`${n}_ore`)) { out.add(`${n}_ore`); if (has(`deepslate_${n}_ore`)) out.add(`deepslate_${n}_ore`); }
   return [...out];
+}
+
+/** Emergency stop: cancel the job, walking, digging, following and fighting straight away. */
+export function stopEverything(bot: mineflayer.Bot): void {
+  if (currentJob?.running) currentJob.stopRequested = true;
+  stopFollowing();
+  cancelFight();
+  try { bot.pathfinder.stop(); } catch { /* ignore */ }
+  try { bot.pathfinder.setGoal(null); } catch { /* ignore */ }
+  try { bot.stopDigging(); } catch { /* ignore */ }
+  try { bot.clearControlStates(); } catch { /* ignore */ }
 }
 
 function startJob(name: string): JobState {
@@ -669,14 +681,13 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
 
   factory.registerTool(
     "stop-work",
-    "Stop the current background job",
+    "Stop everything straight away: the background job, walking, digging, following and fighting.",
     {},
     async () => {
       const bot = getBot();
-      if (!currentJob?.running) return factory.createResponse('No job is running.');
-      currentJob.stopRequested = true;
-      bot.pathfinder.stop();
-      return factory.createResponse(`Stopping ${currentJob.name} (dug ${currentJob.dug} so far)`);
+      const had = currentJob?.running ? `${currentJob.name} (dug ${currentJob.dug} so far)` : null;
+      stopEverything(bot);
+      return factory.createResponse(had ? `Stopped ${had} and everything else` : 'Stopped everything');
     }
   );
 }

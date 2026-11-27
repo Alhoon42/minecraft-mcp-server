@@ -15,6 +15,11 @@ import { resolvePlace, recordChest } from './places-tools.js';
  */
 
 let followTimer: ReturnType<typeof setInterval> | null = null;
+
+export function stopFollowing(): void {
+  if (followTimer) clearInterval(followTimer);
+  followTimer = null;
+}
 let followTarget: string | null = null;
 
 async function gotoNear(bot: mineflayer.Bot, pos: Vec3, range: number, ms = 30000): Promise<void> {

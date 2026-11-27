@@ -24,6 +24,13 @@ const WEAPONS = ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword'
 
 let enabled = true;
 let fighting = false;
+let cancelled = 0;
+
+/** Stop fighting / running away straight away. */
+export function cancelFight(): void {
+  cancelled++;
+  fighting = false;
+}
 
 /** True while the bot is fighting or running away; jobs wait for this. */
 export function isFighting(): boolean {
@@ -74,8 +81,9 @@ async function runFrom(bot: mineflayer.Bot, mob: any, distance = 10): Promise<vo
   const len = Math.hypot(flat.x, flat.z) || 1;
   const target = me.plus(new Vec3(flat.x / len * distance, 0, flat.z / len * distance));
   bot.pathfinder.setGoal(new goals.GoalNear(target.x, target.y, target.z, 2));
+  const myTurn = cancelled;
   const until = Date.now() + 6000;
-  while (Date.now() < until && mob.isValid && mob.position.distanceTo(bot.entity.position) < distance) {
+  while (Date.now() < until && cancelled === myTurn && mob.isValid && mob.position.distanceTo(bot.entity.position) < distance) {
     await sleep(250);
   }
   bot.pathfinder.setGoal(null);
@@ -83,9 +91,10 @@ async function runFrom(bot: mineflayer.Bot, mob: any, distance = 10): Promise<vo
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function fight(bot: mineflayer.Bot, mob: any, maxChase: number): Promise<void> {
+  const myTurn = cancelled;
   await equipWeapon(bot);
   const until = Date.now() + 25000;
-  while (Date.now() < until && mob.isValid) {
+  while (Date.now() < until && mob.isValid && cancelled === myTurn) {
     const d = mob.position.distanceTo(bot.entity.position);
     if (d > maxChase) break;
     if (bot.health <= 6) {

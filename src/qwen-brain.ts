@@ -6,7 +6,7 @@ import * as path from 'path';
 import { ZodType } from 'zod';
 import { ToolFactory } from './tool-factory.js';
 import { log } from './logger.js';
-import { resolveBlockNames, applyProtection } from './tools/work-tools.js';
+import { resolveBlockNames, applyProtection, stopEverything } from './tools/work-tools.js';
 
 /*
  * Qwen brain: lets the player talk to the bot directly, without Claude.
@@ -92,9 +92,14 @@ function saveModel(model: string): void {
   } catch (e) { log('warn', `could not save brain model: ${e}`); }
 }
 
+// "stop", "claude stop", "stop it", "cancel", "halt", "freeze" (optionally with punctuation)
+const STOP_RE = /^\s*(hey\s+)?(claude(bot)?[\s,]*)?(stop|stop it|stop now|stop that|cancel|halt|freeze|wait)[\s!.]*$/i;
+
 export class QwenBrain {
   private history: Msg[] = [];
   private queue: Promise<unknown> = Promise.resolve();
+  /** Bumped by every new message: older commands give up so the newest one wins. */
+  private generation = 0;
   private enabled: boolean;
 
   constructor(
@@ -140,6 +145,7 @@ export class QwenBrain {
   onChat(username: string, message: string): void {
     const m = message.trim();
     const low = m.toLowerCase();
+    if (STOP_RE.test(m)) { this.emergencyStop(); return; }
     if (low === 'brain off') { this.enabled = false; sayInGame(this.getBot(), 'Qwen brain off. Claude only now.'); return; }
     if (low === 'brain fast') { this.setModel(MODELS.fast); return; }
     if (low === 'brain big') { this.setModel(MODELS.big); return; }
@@ -155,10 +161,24 @@ export class QwenBrain {
    * Queue a message. Resolves with the bot's first spoken reply as soon as Qwen gives one,
    * while the commands keep running afterwards (so voice apps aren't kept waiting).
    */
+  /** Stop everything right now, including commands still waiting. */
+  emergencyStop(): void {
+    this.generation++;
+    const bot = this.getBot();
+    if (bot) stopEverything(bot);
+    sayInGame(bot, 'Stopped.');
+    this.history.push({ role: 'user', content: 'Player said STOP. You stopped everything.' });
+  }
+
   private enqueue(player: string, text: string): Promise<string> {
     let firstSay: (t: string) => void = () => {};
     const replied = new Promise<string>(r => { firstSay = r; });
-    const job = this.queue.then(() => this.handle(player, text, firstSay));
+    // Newest command wins: cancel whatever the previous command is doing (walking etc.),
+    // so this one doesn't have to wait for it to finish. Background jobs keep going.
+    const gen = ++this.generation;
+    const bot = this.getBot();
+    try { bot?.pathfinder.stop(); } catch { /* ignore */ }
+    const job = this.queue.then(() => this.handle(player, text, firstSay, gen));
     this.queue = job.catch(() => {});
     job.then(r => firstSay(r), () => firstSay(''));
     return replied;
@@ -233,8 +253,9 @@ ${buildToolList(this.factory)}`;
     }
   }
 
-  private async handle(player: string, text: string, onSay: (t: string) => void): Promise<string> {
+  private async handle(player: string, text: string, onSay: (t: string) => void, gen: number): Promise<string> {
     const bot = this.getBot();
+    if (gen !== this.generation) return '';
     this.history.push({ role: 'user', content: `${player}: ${text}` });
     this.history = this.history.slice(-8);
 
@@ -260,7 +281,10 @@ ${buildToolList(this.factory)}`;
 
         const results: string[] = [];
         let needAnswer = false;
+        // A newer message arrived while Qwen was thinking: drop this one
+        if (gen !== this.generation) break;
         for (const a of actions) {
+          if (gen !== this.generation) break;
           const tool = this.factory.registry.get(a.command);
           if (!tool || !ALLOWED.includes(a.command)) {
             results.push(`${a.command}: not a command I have`);
@@ -322,7 +346,9 @@ ${buildToolList(this.factory)}`;
           const bot = this.getBot();
           player = Object.keys(bot?.players ?? {}).find(n => n !== bot?.username) ?? 'Player';
         }
-        const reply = text.trim() ? await this.enqueue(player, text.trim()) : '';
+        let reply = '';
+        if (STOP_RE.test(text)) { this.emergencyStop(); reply = 'Stopped.'; }
+        else if (text.trim()) reply = await this.enqueue(player, text.trim());
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ reply }));
       });
