@@ -35,6 +35,14 @@ const ALLOWED = [
   'read-signs', 'name-chests-from-signs', 'self-defence', 'attack-nearest', 'sort-into-chests',
 ];
 
+// Commands that need the bot's legs: a running background job (digging/mining) is stopped first,
+// otherwise the job keeps dragging him back and "come here" never works.
+const TAKES_OVER = new Set([
+  'move-to-position', 'follow-player', 'go-to-place', 'sleep', 'toss-item', 'deposit-to-chest',
+  'withdraw-from-chest', 'craft', 'smelt-item', 'place-block', 'dig-block', 'attack-nearest',
+  'dig-area', 'mine-ore', 'dig-stairs', 'dig-inside-markers', 'sort-into-chests', 'check-chests',
+]);
+
 // Commands that just look things up: their results are fed back so Qwen can answer questions
 const LOOKUPS = new Set([
   'get-position', 'list-inventory', 'find-blocks', 'find-entity', 'work-status',
@@ -351,6 +359,7 @@ ${buildToolList(this.factory)}`;
             a.args.maxDistance ??= 64;
           }
           if (bot) applyProtection(bot);
+          if (bot && TAKES_OVER.has(a.command)) stopEverything(bot);
           log('info', `Qwen -> ${a.command} ${JSON.stringify(a.args ?? {})}`);
           const a0 = Date.now();
           const r = await tool.run(a.args ?? {});
