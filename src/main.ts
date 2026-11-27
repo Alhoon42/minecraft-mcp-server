@@ -20,6 +20,7 @@ import { registerFurnaceTools } from './tools/furnace-tools.js';
 import { registerWorkTools } from './tools/work-tools.js';
 import { registerExtraTools } from './tools/extra-tools.js';
 import { registerPlacesTools } from './tools/places-tools.js';
+import { QwenBrain } from './qwen-brain.js';
 
 setupStdioFiltering();
 
@@ -34,12 +35,16 @@ process.on('uncaughtException', (error) => {
 async function main() {
   const config = parseConfig();
   const messageStore = new MessageStore();
+  let brain: QwenBrain | null = null;
 
   const connection = new BotConnection(
     config,
     {
       onLog: log,
-      onChatMessage: (username, message) => messageStore.addMessage(username, message)
+      onChatMessage: (username, message) => {
+        messageStore.addMessage(username, message);
+        brain?.onChat(username, message);
+      }
     }
   );
 
@@ -65,6 +70,14 @@ async function main() {
   registerWorkTools(factory, getBot);
   registerExtraTools(factory, getBot);
   registerPlacesTools(factory, getBot);
+
+  brain = new QwenBrain(factory, () => connection.getBot(), {
+    enabled: config.brain,
+    ollamaUrl: config.ollamaUrl,
+    model: config.model,
+    httpPort: config.brainPort,
+  });
+  brain.start();
 
   process.stdin.on('end', () => {
     connection.cleanup();

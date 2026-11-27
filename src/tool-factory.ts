@@ -8,7 +8,17 @@ type McpResponse = {
   [key: string]: unknown;
 };
 
+export interface RegisteredTool {
+  name: string;
+  description: string;
+  schema: Record<string, unknown>;
+  run: (args: unknown) => Promise<McpResponse>;
+}
+
 export class ToolFactory {
+  /** All registered tools, so other parts of the server (e.g. the Qwen brain) can run them. */
+  readonly registry = new Map<string, RegisteredTool>();
+
   constructor(
     private server: McpServer,
     private connection: BotConnection
@@ -21,7 +31,7 @@ export class ToolFactory {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     executor: (args: any) => Promise<McpResponse>
   ): void {
-    this.server.tool(name, description, schema, async (args: unknown): Promise<McpResponse> => {
+    const run = async (args: unknown): Promise<McpResponse> => {
       const connectionCheck = await this.connection.checkConnectionAndReconnect();
 
       if (!connectionCheck.connected) {
@@ -39,7 +49,9 @@ export class ToolFactory {
       } catch (error) {
         return this.createErrorResponse(error as Error);
       }
-    });
+    };
+    this.registry.set(name, { name, description, schema, run });
+    this.server.tool(name, description, schema, run);
   }
 
   createResponse(text: string): McpResponse {

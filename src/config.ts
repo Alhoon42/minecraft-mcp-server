@@ -5,10 +5,14 @@ export interface ServerConfig {
   host: string;
   port: number;
   username: string;
+  brain: boolean;
+  ollamaUrl: string;
+  model: string;
+  brainPort: number;
 }
 
 export function parseConfig(): ServerConfig {
-  return yargs(hideBin(process.argv))
+  const argv = yargs(hideBin(process.argv))
     .option('host', {
       type: 'string',
       description: 'Minecraft server host',
@@ -24,7 +28,36 @@ export function parseConfig(): ServerConfig {
       description: 'Bot username',
       default: 'LLMBot'
     })
+    .option('brain', {
+      type: 'boolean',
+      description: 'Let players talk to the bot directly via a local Ollama model',
+      default: true
+    })
+    .option('ollama-url', {
+      type: 'string',
+      description: 'Ollama address',
+      default: 'http://localhost:11434'
+    })
+    .option('model', {
+      type: 'string',
+      description: 'Ollama model for the brain',
+      default: 'qwen3.6:latest'
+    })
+    .option('brain-port', {
+      type: 'number',
+      description: 'Local HTTP port for voice apps (POST /say); 0 to disable',
+      default: 3456
+    })
     .help()
     .alias('help', 'h')
-    .parseSync();
+    .parseSync() as Record<string, unknown>;
+  return {
+    host: String(argv.host),
+    port: Number(argv.port),
+    username: String(argv.username),
+    brain: argv.brain !== false,
+    ollamaUrl: String(argv['ollama-url'] ?? 'http://localhost:11434'),
+    model: String(argv.model ?? 'qwen3.6:latest'),
+    brainPort: Number(argv['brain-port'] ?? 3456),
+  };
 }
