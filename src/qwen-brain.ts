@@ -6,7 +6,7 @@ import * as path from 'path';
 import { ZodType } from 'zod';
 import { ToolFactory } from './tool-factory.js';
 import { log } from './logger.js';
-import { resolveBlockNames, applyProtection, stopEverything, jobSummary } from './tools/work-tools.js';
+import { resolveBlockNames, applyProtection, stopEverything, jobSummary, isJobRunning } from './tools/work-tools.js';
 
 /*
  * Qwen brain: lets the player talk to the bot directly, without Claude.
@@ -359,7 +359,11 @@ ${buildToolList(this.factory)}`;
             a.args.maxDistance ??= 64;
           }
           if (bot) applyProtection(bot);
-          if (bot && TAKES_OVER.has(a.command)) stopEverything(bot);
+          if (bot && TAKES_OVER.has(a.command) && isJobRunning()) {
+            stopEverything(bot);
+            // give the old job a moment to wind down so a new job can start
+            for (let i = 0; i < 25 && isJobRunning(); i++) await new Promise(r => setTimeout(r, 200));
+          }
           log('info', `Qwen -> ${a.command} ${JSON.stringify(a.args ?? {})}`);
           const a0 = Date.now();
           const r = await tool.run(a.args ?? {});

@@ -437,6 +437,10 @@ export function matchesItem(name: string, raw: string): boolean {
   return name.endsWith(`_${q}`) || name.endsWith(`_${q}s`) || name.startsWith(`${q}_`);
 }
 
+export function isJobRunning(): boolean {
+  return !!currentJob?.running;
+}
+
 /** One-line summary of the current job, for the Qwen brain. */
 export function jobSummary(): string {
   if (!currentJob) return 'No job.';
