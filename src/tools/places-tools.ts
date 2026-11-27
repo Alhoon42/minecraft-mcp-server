@@ -167,7 +167,11 @@ export function registerPlacesTools(factory: ToolFactory, getBot: () => mineflay
       for (const sp of signs) {
         const text = signText(bot.blockAt(sp)).replace(/ \/ /g, ' ');
         if (!text) continue;
-        const chest = bot.findBlock({ matching: containerIds(bot), maxDistance: 2, point: sp });
+        // Sign directly above a chest wins; otherwise the closest chest within 2 blocks
+        const below = bot.blockAt(sp.offset(0, -1, 0));
+        const chest = (below && containerIds(bot).includes(below.type))
+          ? below
+          : bot.findBlock({ matching: containerIds(bot), maxDistance: 2, point: sp });
         if (!chest) continue;
         const p = chest.position;
         load().places[norm(text)] = { x: p.x, y: p.y, z: p.z };
