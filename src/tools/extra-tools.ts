@@ -7,7 +7,7 @@ import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
 import { applyProtection } from './work-tools.js';
-import { resolvePlace, recordChest } from './places-tools.js';
+import { resolvePlace, recordChest, chestNearPlayer } from './places-tools.js';
 
 /*
  * Extra everyday commands: craft (reliable, uses a crafting table), chests,
@@ -142,12 +142,16 @@ export function registerExtraTools(factory: ToolFactory, getBot: () => mineflaye
       count: z.coerce.number().int().positive().optional().describe("How many (default: all of that item)"),
       x: z.coerce.number().optional(), y: z.coerce.number().optional(), z: z.coerce.number().optional(),
       place: z.string().optional().describe("Named place, e.g. 'chest 1' (see save-place)"),
+      nearPlayer: z.boolean().optional().describe("Use the chest the player is standing on or next to"),
     },
-    async ({ itemName, count, x, y, z: zz, place }: { itemName: string; count?: number; x?: number; y?: number; z?: number; place?: string }) => {
+    async ({ itemName, count, x, y, z: zz, place, nearPlayer }: { itemName: string; count?: number; x?: number; y?: number; z?: number; place?: string; nearPlayer?: boolean }) => {
       const bot = getBot();
       let named: Vec3 | null = null;
-      if (place) {
-        named = resolvePlace(place);
+      if (nearPlayer) {
+        named = chestNearPlayer(bot);
+        if (!named) return factory.createResponse("I can't see a chest right next to you.");
+      } else if (place) {
+        named = resolvePlace(place, bot);
         if (!named) return factory.createResponse(`No place called "${place}". Use list-places.`);
       }
       const chestBlock = named
@@ -190,12 +194,16 @@ export function registerExtraTools(factory: ToolFactory, getBot: () => mineflaye
       count: z.coerce.number().int().positive().optional().describe("How many (default: all)"),
       x: z.coerce.number().optional(), y: z.coerce.number().optional(), z: z.coerce.number().optional(),
       place: z.string().optional().describe("Named place, e.g. 'chest 1' (see save-place)"),
+      nearPlayer: z.boolean().optional().describe("Use the chest the player is standing on or next to"),
     },
-    async ({ itemName, count, x, y, z: zz, place }: { itemName: string; count?: number; x?: number; y?: number; z?: number; place?: string }) => {
+    async ({ itemName, count, x, y, z: zz, place, nearPlayer }: { itemName: string; count?: number; x?: number; y?: number; z?: number; place?: string; nearPlayer?: boolean }) => {
       const bot = getBot();
       let named: Vec3 | null = null;
-      if (place) {
-        named = resolvePlace(place);
+      if (nearPlayer) {
+        named = chestNearPlayer(bot);
+        if (!named) return factory.createResponse("I can't see a chest right next to you.");
+      } else if (place) {
+        named = resolvePlace(place, bot);
         if (!named) return factory.createResponse(`No place called "${place}". Use list-places.`);
       }
       const chestBlock = named
@@ -251,6 +259,7 @@ export function registerExtraTools(factory: ToolFactory, getBot: () => mineflaye
     {
       x: z.coerce.number().optional(), y: z.coerce.number().optional(), z: z.coerce.number().optional(),
       place: z.string().optional().describe("Named place, e.g. 'chest 1' (see save-place)"),
+      nearPlayer: z.boolean().optional().describe("Use the chest the player is standing on or next to"),
     },
     async ({ x, y, z: zz }: { x?: number; y?: number; z?: number }) => {
       const bot = getBot();

@@ -48,12 +48,49 @@ function save(): void {
   }
 }
 
-const norm = (name: string) => name.trim().toLowerCase();
+const NUMBER_WORDS: Record<string, string> = { one: '1', two: '2', three: '3', four: '4', five: '5', six: '6',
+  seven: '7', eight: '8', nine: '9', ten: '10', eleven: '11', twelve: '12', first: '1', second: '2', third: '3', fourth: '4' };
+/** "The Chest Three!" -> "chest 3", "chest3" -> "chest 3", "chest number 2" -> "chest 2" */
+const norm = (name: string) => name.toLowerCase()
+  .replace(/[^a-z0-9 ]+/g, ' ')
+  .replace(/\b(the|number|no)\b/g, ' ')
+  .replace(/\b([a-z]+)\b/g, w => NUMBER_WORDS[w] ?? w)
+  .replace(/([a-z])(\d)/g, '$1 $2')
+  .replace(/\s+/g, ' ')
+  .trim();
 const key = (p: { x: number; y: number; z: number }) => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
 
-export function resolvePlace(name: string): Vec3 | null {
-  const p = load().places[norm(name)];
-  return p ? new Vec3(p.x, p.y, p.z) : null;
+export function resolvePlace(name: string, bot?: mineflayer.Bot): Vec3 | null {
+  const m = load();
+  const want = norm(name);
+  for (const [n, p] of Object.entries(m.places)) {
+    if (norm(n) === want) return new Vec3(p.x, p.y, p.z);
+  }
+  // Not saved yet: look for a sign with that text on or next to a chest, and remember it
+  if (bot) {
+    const signs = bot.findBlocks({ matching: signIds(bot), maxDistance: 48, count: 100 });
+    for (const sp of signs) {
+      if (norm(signText(bot.blockAt(sp)).replace(/ \/ /g, ' ')) !== want) continue;
+      const below = bot.blockAt(sp.offset(0, -1, 0));
+      const chest = (below && containerIds(bot).includes(below.type))
+        ? below
+        : bot.findBlock({ matching: containerIds(bot), maxDistance: 2, point: sp });
+      if (!chest) continue;
+      const c = chest.position;
+      m.places[want] = { x: c.x, y: c.y, z: c.z };
+      save();
+      return c.clone();
+    }
+  }
+  return null;
+}
+
+/** The chest nearest to the nearest player (for "I'm standing on/next to the chest"). */
+export function chestNearPlayer(bot: mineflayer.Bot): Vec3 | null {
+  const player = nearestPlayer(bot);
+  if (!player?.entity) return null;
+  const c = bot.findBlock({ matching: containerIds(bot), maxDistance: 4, point: player.entity.position });
+  return c ? c.position.clone() : null;
 }
 
 function placeNameFor(pos: Vec3): string | null {
@@ -240,7 +277,7 @@ export function registerPlacesTools(factory: ToolFactory, getBot: () => mineflay
     { name: z.string() },
     async ({ name }: { name: string }) => {
       const bot = getBot();
-      const pos = resolvePlace(name);
+      const pos = resolvePlace(name, bot);
       if (!pos) return factory.createResponse(`No place called "${name}". Use list-places.`);
       await gotoNear(bot, pos, 2, 120000);
       return factory.createResponse(`At "${norm(name)}"`);
@@ -255,7 +292,7 @@ export function registerPlacesTools(factory: ToolFactory, getBot: () => mineflay
       const bot = getBot();
       let targets: Vec3[];
       if (name) {
-        const pos = resolvePlace(name);
+        const pos = resolvePlace(name, bot);
         if (!pos) return factory.createResponse(`No place called "${name}".`);
         targets = [pos];
       } else {

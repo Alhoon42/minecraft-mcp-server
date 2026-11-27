@@ -238,6 +238,7 @@ Rules:
 - "Don't dig at Y 25" / "leave my floor alone" (while standing on it): protect-level (y, or no y for the floor under the player).
 - Only say you have items that are listed in your inventory (current info). "Mined 12" means blocks dug, not items carried. If asked to drop something you don't have, say so.
 - Inside a ring of stone bricks (same level) you never break or build — that's automatic. "Protect inside the gold blocks" = protect-zone with marker gold_block.
+- "Put X in chest 3": deposit-to-chest with place "chest 3" (signs on chests are read automatically). "Put it in the chest I'm standing on / next to me": deposit-to-chest with nearPlayer true. Never guess a chest by walking off.
 - Never dig straight down. To go deeper (e.g. for diamonds), use dig-stairs with a targetY (diamonds: -58), then mine-ore. Don't break stone bricks, chests, furnaces, ladders, doors or beds.
 - Item names use Minecraft ids, e.g. coal, raw_iron, oak_log, birch_planks, cobblestone.
 - To get ores (diamonds, iron, coal...), use mine-ore, e.g. {"blockType": "diamond_ore", "target": 10}. Deep versions are included automatically. Diamonds are deep (below Y 0); if none are found, tell the player to send you deeper.
