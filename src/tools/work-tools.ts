@@ -317,6 +317,12 @@ export function resolveBlockNames(version: string, raw: string): string[] {
   return [...out];
 }
 
+/** One-line summary of the current job, for the Qwen brain. */
+export function jobSummary(): string {
+  if (!currentJob) return 'No job.';
+  return `${currentJob.running ? 'Running' : 'Last'} job: ${currentJob.name} — ${currentJob.message} (dug ${currentJob.dug})`;
+}
+
 /** Emergency stop: cancel the job, walking, digging, following and fighting straight away. */
 export function stopEverything(bot: mineflayer.Bot): void {
   if (currentJob?.running) currentJob.stopRequested = true;

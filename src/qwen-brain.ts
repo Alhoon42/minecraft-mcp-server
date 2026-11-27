@@ -6,7 +6,7 @@ import * as path from 'path';
 import { ZodType } from 'zod';
 import { ToolFactory } from './tool-factory.js';
 import { log } from './logger.js';
-import { resolveBlockNames, applyProtection, stopEverything } from './tools/work-tools.js';
+import { resolveBlockNames, applyProtection, stopEverything, jobSummary } from './tools/work-tools.js';
 
 /*
  * Qwen brain: lets the player talk to the bot directly, without Claude.
@@ -199,6 +199,7 @@ Rules:
 - "come here"/"come to me": move-to-position with the player's position and range 2.
 - "give me X"/"throw me X": move-to-position near the player (range 3), then toss-item with lookAt set to the player's position.
 - "Dig inside the crystal/amethyst blocks": dig-inside-markers with bottomY (ask how deep if not said).
+- "What level are you on?" / "how deep are you?": answer with your Y from the current info (e.g. "I'm on Y 32"). If a dig job is running, also say which layer it's on. No actions needed.
 - Never dig straight down. To go deeper (e.g. for diamonds), use dig-stairs with a targetY (diamonds: -58), then mine-ore. Don't break stone bricks, chests, furnaces, ladders, doors or beds.
 - Item names use Minecraft ids, e.g. coal, raw_iron, oak_log, birch_planks, cobblestone.
 - To get ores (diamonds, iron, coal...), use mine-ore, e.g. {"blockType": "diamond_ore", "target": 10}. Deep versions are included automatically. Diamonds are deep (below Y 0); if none are found, tell the player to send you deeper.
@@ -224,6 +225,7 @@ ${buildToolList(this.factory)}`;
       const inv = bot.inventory.items().map(i => `${i.name} x${i.count}`).join(', ');
       context += `Your inventory: ${inv || 'empty'}.\n`;
       context += `Health ${Math.round(bot.health)}/20, food ${Math.round(bot.food)}/20.\n`;
+      context += `${jobSummary()}\n`;
     }
     return context;
   }
