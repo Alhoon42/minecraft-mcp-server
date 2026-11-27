@@ -252,6 +252,7 @@ Rules:
 - "Put X in chest 3": deposit-to-chest with place "chest 3" (signs on chests are read automatically). "Put it in the chest I'm standing on / next to me": deposit-to-chest with nearPlayer true. Never guess a chest by walking off.
 - "Sort your stuff" / "put everything in the right chests": sort-into-chests (uses the signs on the chests).
 - To craft with things from a chest: withdraw-from-chest each ingredient first (e.g. stick, iron_ingot), then craft. Use where-is if you don't know which chest. Iron pickaxe = 3 iron_ingot + 2 stick each.
+- Several items for one chest = one deposit-to-chest action per item (e.g. iron_ingot, then stick).
 - Never dig straight down. To go deeper (e.g. for diamonds), use dig-stairs with a targetY (diamonds: -58), then mine-ore. Don't break stone bricks, chests, furnaces, ladders, doors or beds.
 - Item names use Minecraft ids, e.g. coal, raw_iron, oak_log, birch_planks, cobblestone.
 - To get ores (diamonds, iron, coal...), use mine-ore, e.g. {"blockType": "diamond_ore", "target": 10}. Deep versions are included automatically. Diamonds are deep (below Y 0); if none are found, tell the player to send you deeper.
@@ -335,7 +336,16 @@ ${buildToolList(this.factory)}`;
         }
 
         const actions = Array.isArray(plan.actions) ? plan.actions.slice(0, 5) : [];
-        if (actions.length === 0) break;
+        if (actions.length === 0) {
+          // Small models sometimes promise to do something ("I'll put the iron in the chest")
+          // without giving the command. Ask once more for the actual command.
+          const promised = /\b(i'll|i will|on it|going to|let me|putting|heading|coming|okay|sure)\b/i.test(plan.say ?? '');
+          if (promised && round === 0 && !/\?\s*$/.test(plan.say ?? '')) {
+            this.history.push({ role: 'user', content: 'You said you would do it but gave no actions. Reply again with the actions needed (JSON). Keep "say" empty.' });
+            continue;
+          }
+          break;
+        }
 
         const results: string[] = [];
         let needAnswer = false;
@@ -374,6 +384,10 @@ ${buildToolList(this.factory)}`;
           const out = r.content.map(c => c.text).join('\n');
           results.push(`${a.command}: ${out}`);
           if (LOOKUPS.has(a.command) || r.isError) needAnswer = true;
+          // Tell the player straight away when a command didn't work, instead of standing there
+          if (r.isError || /^(no |failed|can't|cannot|unknown|i can't|couldn't|not a command)/i.test(out.trim())) {
+            sayInGame(bot, `Couldn't do that: ${out.replace(/\s+/g, ' ').slice(0, 180)}`);
+          }
         }
         this.history.push({ role: 'user', content: `Command results:\n${results.join('\n').slice(0, 2000)}` });
         if (!needAnswer) break;
