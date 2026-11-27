@@ -70,10 +70,42 @@ function buildToolList(factory: ToolFactory): string {
   return lines.join('\n');
 }
 
+// Everything the bot says in chat, so a voice app can read out messages he says by himself
+// (job finished, lava, full bag...). Replies to the player are marked so they aren't read twice.
+interface BotEvent { id: number; text: string; reply: boolean; at: number }
+const events: BotEvent[] = [];
+let nextEventId = 1;
+let replyDepth = 0;
+const eventWaiters: (() => void)[] = [];
+const patched = new WeakSet<object>();
+
+function recordEvent(text: string, reply: boolean): void {
+  events.push({ id: nextEventId++, text, reply, at: Date.now() });
+  if (events.length > 200) events.splice(0, events.length - 200);
+  const waiting = eventWaiters.splice(0);
+  for (const w of waiting) w();
+}
+
+function patchChat(bot: mineflayer.Bot | null | undefined): void {
+  if (!bot || patched.has(bot)) return;
+  patched.add(bot);
+  const original = bot.chat.bind(bot);
+  bot.chat = (message: string) => {
+    recordEvent(message, replyDepth > 0);
+    original(message);
+  };
+}
+
 function sayInGame(bot: mineflayer.Bot | null | undefined, text: string): void {
   if (!bot || !text) return;
+  patchChat(bot);
   const clean = text.replace(/\s+/g, ' ').trim();
-  for (let i = 0; i < clean.length && i < 600; i += 240) bot.chat(clean.slice(i, i + 240));
+  replyDepth++;
+  try {
+    for (let i = 0; i < clean.length && i < 600; i += 240) bot.chat(clean.slice(i, i + 240));
+  } finally {
+    replyDepth--;
+  }
 }
 
 const MODELS: Record<string, string> = {
@@ -129,6 +161,8 @@ export class QwenBrain {
 
   start(): void {
     if (this.config.httpPort > 0) this.startHttp();
+    // Keep watching the bot's chat (the bot object changes when it reconnects)
+    setInterval(() => patchChat(this.getBot()), 1000);
     log('info', `Qwen brain ${this.enabled ? 'on' : 'off'} (model ${this.config.model})`);
     // Warm up: load Qwen into the graphics card and pre-read the long fixed prompt,
     // so the first real message is quick.
@@ -336,6 +370,26 @@ ${buildToolList(this.factory)}`;
 
   private startHttp(): void {
     const server = http.createServer((req, res) => {
+      // GET /events?after=<id>: things the bot said by himself since that id.
+      // Waits up to 25 s for something new (long poll). after=0 on first call returns only the latest id.
+      if (req.method === 'GET' && req.url?.startsWith('/events')) {
+        const url = new URL(req.url, 'http://localhost');
+        const after = Number(url.searchParams.get('after') ?? '0');
+        const send = () => {
+          const list = after > 0 ? events.filter(e => e.id > after && !e.reply).map(e => ({ id: e.id, text: e.text })) : [];
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ events: list, last: nextEventId - 1 }));
+        };
+        const hasNew = () => after > 0 && events.some(e => e.id > after && !e.reply);
+        if (after === 0 || hasNew()) { send(); return; }
+        let done = false;
+        const finish = () => { if (!done) { done = true; send(); } };
+        const wake = () => { if (hasNew()) finish(); else eventWaiters.push(wake); };
+        eventWaiters.push(wake);
+        setTimeout(finish, 25000);
+        req.on('close', () => { done = true; });
+        return;
+      }
       if (req.method !== 'POST' || !req.url?.startsWith('/say')) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'POST /say with {"text": "..."}' }));
