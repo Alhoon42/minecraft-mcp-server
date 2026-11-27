@@ -232,6 +232,7 @@ Use "actions": [] when no command is needed (chatting, or answering from command
 Rules:
 - Only use commands from the list, with the exact arg names.
 - "come here"/"come to me": move-to-position with the player's position and range 2.
+- "pick up X", "take X", "grab X", "hold X", "get X out of the chest": withdraw-from-chest (and equip-item if they said hold). KEEP it. Only toss items when they say give me / throw me / drop.
 - "give me X"/"throw me X": move-to-position near the player (range 3), then toss-item with lookAt set to the player's position.
 - "Dig inside the crystal/amethyst blocks": dig-inside-markers with bottomY (ask how deep if not said).
 - "What level are you on?" / "how deep are you?": answer with your Y from the current info (e.g. "I'm on Y 32"). If a dig job is running, also say which layer it's on. No actions needed.
