@@ -32,8 +32,10 @@ let home: Vec3 | null = new Vec3(-386, 54, 71);
 // Y limits: never dig above maxDigY or below minDigY (null = no limit)
 let maxDigY: number | null = null;
 let minDigY: number | null = null;
+// Single protected levels, e.g. a floor at Y 25 (never dug)
+const keepLevels = new Set<number>();
 function outsideLimits(y: number): boolean {
-  return (maxDigY !== null && y > maxDigY) || (minDigY !== null && y < minDigY);
+  return keepLevels.has(y) || (maxDigY !== null && y > maxDigY) || (minDigY !== null && y < minDigY);
 }
 
 async function goHome(bot: mineflayer.Bot): Promise<void> {
@@ -498,10 +500,31 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
       clear: z.boolean().optional().describe("Remove all limits"),
     },
     async ({ maxY, minY, clear }: { maxY?: number; minY?: number; clear?: boolean }) => {
-      if (clear) { maxDigY = null; minDigY = null; return factory.createResponse('Digging limits removed.'); }
+      if (clear) { maxDigY = null; minDigY = null; keepLevels.clear(); return factory.createResponse('Digging limits and protected levels removed.'); }
       if (maxY !== undefined) maxDigY = maxY;
       if (minY !== undefined) minDigY = minY;
       return factory.createResponse(`Digging limits: ${maxDigY !== null ? `nothing above Y${maxDigY}` : 'no top limit'}, ${minDigY !== null ? `nothing below Y${minDigY}` : 'no bottom limit'}.`);
+    }
+  );
+
+  factory.registerTool(
+    "protect-level",
+    "Never dig at one Y level (e.g. a floor the player built). With no y, uses the level of the floor the nearest player is standing on. remove: true un-protects it.",
+    {
+      y: z.coerce.number().int().optional().describe("Y level to leave alone (default: the floor under the player)"),
+      remove: z.boolean().optional(),
+    },
+    async ({ y, remove }: { y?: number; remove?: boolean }) => {
+      const bot = getBot();
+      let level = y;
+      if (level === undefined) {
+        const player = Object.values(bot.players).find(p => p.entity && p.username !== bot.username);
+        if (!player?.entity) return factory.createResponse("I can't see you. Tell me the Y level instead.");
+        level = Math.floor(player.entity.position.y) - 1;
+      }
+      if (remove) keepLevels.delete(level); else keepLevels.add(level);
+      const list = [...keepLevels].sort((a, b) => b - a).map(v => `Y${v}`).join(', ') || 'none';
+      return factory.createResponse(`${remove ? 'No longer protecting' : 'Leaving alone'} Y${level}. Protected levels: ${list}`);
     }
   );
 
