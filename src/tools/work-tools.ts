@@ -727,6 +727,11 @@ export function registerWorkTools(factory: ToolFactory, getBot: () => mineflayer
       const bot = getBot();
       if (!home) return factory.createResponse('No home set.');
       await goHome(bot, 'Back at base!');
+      const d = bot.entity.position.distanceTo(home);
+      if (d > 4) {
+        const p = bot.entity.position.floored();
+        return factory.createResponse(`Couldn't get back to base: I'm still at (${p.x}, ${p.y}, ${p.z}), ${Math.round(d)} blocks away.`);
+      }
       return factory.createResponse(`At base (${home.x}, ${home.y}, ${home.z})`);
     }
   );
