@@ -144,6 +144,7 @@ export class QwenBrain {
     if (low === 'brain fast') { this.setModel(MODELS.fast); return; }
     if (low === 'brain big') { this.setModel(MODELS.big); return; }
     if (low.startsWith('brain model ')) { this.setModel(m.slice('brain model '.length).trim()); return; }
+    if (low === 'brain timing') { this.showTiming = !this.showTiming; sayInGame(this.getBot(), `Timing ${this.showTiming ? 'on' : 'off'}`); return; }
     if (low === 'brain which') { sayInGame(this.getBot(), `Using ${this.config.model}`); return; }
     if (low === 'brain on') { this.enabled = true; sayInGame(this.getBot(), 'Qwen brain on. Talk to me!'); return; }
     if (!this.enabled || m.startsWith('/')) return;
@@ -164,6 +165,7 @@ export class QwenBrain {
   }
 
   private cachedSystem = '';
+  private showTiming = true;
 
   /** Fixed part of the prompt. Kept identical between calls so Ollama can reuse it (much faster). */
   private systemPrompt(): string {
@@ -241,7 +243,11 @@ ${buildToolList(this.factory)}`;
       for (let round = 0; round < 3; round++) {
         // Live info goes last so the long fixed prompt at the start stays cached in Ollama
         const live: Msg = { role: 'user', content: `[Current info]\n${this.context(player)}` };
+        const t0 = Date.now();
         const plan = await this.askQwen([{ role: 'system', content: this.systemPrompt() }, ...this.history, live]);
+        const secs = ((Date.now() - t0) / 1000).toFixed(1);
+        log('info', `Qwen answered in ${secs}s`);
+        if (this.showTiming && plan.say) plan.say = `${plan.say} [${secs}s]`;
         this.history.push({ role: 'assistant', content: JSON.stringify(plan) });
         if (plan.say) {
           reply = plan.say;
@@ -274,7 +280,10 @@ ${buildToolList(this.factory)}`;
           }
           if (bot) applyProtection(bot);
           log('info', `Qwen -> ${a.command} ${JSON.stringify(a.args ?? {})}`);
+          const a0 = Date.now();
           const r = await tool.run(a.args ?? {});
+          const took = (Date.now() - a0) / 1000;
+          if (this.showTiming && took > 3) sayInGame(bot, `(${a.command} took ${took.toFixed(1)}s)`);
           const out = r.content.map(c => c.text).join('\n');
           results.push(`${a.command}: ${out}`);
           if (LOOKUPS.has(a.command) || r.isError) needAnswer = true;
