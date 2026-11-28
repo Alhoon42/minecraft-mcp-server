@@ -133,6 +133,15 @@ async function goHome(bot: mineflayer.Bot, arrived = 'Back at base with a full b
   if (!home) return;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const movements: any = (bot.pathfinder as any).movements;
+  // Take the stairs, not the ladder (the player's request). If there's no other way, use the ladder.
+  const savedClimbables = movements?.climbables;
+  if (movements && savedClimbables instanceof Set) movements.climbables = new Set();
+  try {
+    await withTimeout(bot.pathfinder.goto(new goals.GoalNear(home.x, home.y, home.z, 2)), 60000, bot);
+    bot.chat(arrived);
+    return;
+  } catch { /* no stair route found: fall back to the normal way */ }
+  finally { if (movements && savedClimbables) movements.climbables = savedClimbables; }
   try {
     // Far away (e.g. deep in a mine): retrace the way he came first
     if (bot.entity.position.distanceTo(home) > 24 && trail.length > 2) {
